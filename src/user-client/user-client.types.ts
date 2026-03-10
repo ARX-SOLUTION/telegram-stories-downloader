@@ -34,7 +34,15 @@ export interface StoryMediaItem {
 
 export interface StoryDownloadResult {
   storyId: number;
+  date: number;
   buffer: Buffer;
   mimeType: string;
   filename: string;
+}
+
+export interface StoryFetchStatus {
+  username: string;
+  total: number;
+  downloaded: number;
+  failed: number;
 }

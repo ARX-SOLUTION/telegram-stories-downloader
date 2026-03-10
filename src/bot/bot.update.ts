@@ -7,7 +7,6 @@ import {
   LoginFlowResponse,
   LoginState,
   StoryDownloadResult,
-  StoryMediaItem,
   UserClientStatus,
 } from '../user-client/user-client.types';
 
@@ -25,6 +24,9 @@ interface TelegrafContext {
 @Injectable()
 export class BotUpdate {
   private static readonly TELEGRAM_VIDEO_LIMIT_BYTES = 50 * 1024 * 1024;
+  private static readonly TELEGRAM_USERNAME_REGEX = /^@?([a-zA-Z0-9_]{5,32})$/;
+  private static readonly TELEGRAM_USERNAME_LINK_REGEX =
+    /^https?:\/\/t\.me\/([a-zA-Z0-9_]{5,32})\/?$/i;
   private readonly logger = new Logger(BotUpdate.name);
   private activeLoginChatId: number | null = null;
 
@@ -148,41 +150,9 @@ export class BotUpdate {
       return;
     }
 
-    const storyUsername = this.extractMentionOrLinkUsername(rawText);
+    const storyUsername = this.extractDirectUsername(rawText);
     if (storyUsername) {
       await this.handleStoriesRequest(ctx, storyUsername);
-      return;
-    }
-
-    const text = rawText.toLowerCase();
-
-    if (
-      text.includes('hello') ||
-      text.includes('salom') ||
-      text.includes('привет')
-    ) {
-      await this.replyHtml(
-        ctx,
-        `👋 Salom, <b>${this.escapeHtml(username)}</b>!`,
-      );
-      return;
-    }
-
-    if (text.includes('bye') || text.includes('xayr')) {
-      await this.replyHtml(
-        ctx,
-        `👋 Xayr, <b>${this.escapeHtml(username)}</b>!`,
-      );
-      return;
-    }
-
-    if (text.includes('ping')) {
-      await this.replyHtml(ctx, '🏓 <b>Pong!</b>');
-      return;
-    }
-
-    if (this.isPlainUsername(rawText)) {
-      await this.handleStoriesRequest(ctx, rawText);
     }
   }
 
@@ -426,38 +396,29 @@ export class BotUpdate {
     }
 
     const match = text.match(/^\/stories(?:@\w+)?(?:\s+(.+))?$/s);
-    const username = match?.[1]?.trim();
-    return username || null;
+    return this.extractDirectUsername(match?.[1] ?? '');
   }
 
-  private extractMentionOrLinkUsername(text: string): string | null {
+  private extractDirectUsername(text: string): string | null {
     const trimmedText = text.trim();
 
-    if (/^https?:\/\/t\.me\/[a-zA-Z0-9_]{5,32}\/?$/i.test(trimmedText)) {
-      return trimmedText;
+    const linkMatch = trimmedText.match(BotUpdate.TELEGRAM_USERNAME_LINK_REGEX);
+    if (linkMatch) {
+      return this.isNumericOnlyUsername(linkMatch[1]) ? null : linkMatch[1];
     }
 
-    if (/^@[a-zA-Z0-9_]{5,32}$/.test(trimmedText)) {
-      return trimmedText;
+    const usernameMatch = trimmedText.match(BotUpdate.TELEGRAM_USERNAME_REGEX);
+    if (!usernameMatch) {
+      return null;
     }
 
-    const mentionMatch = trimmedText.match(/@([a-zA-Z0-9_]{5,32})/);
-    if (mentionMatch) {
-      return mentionMatch[0];
-    }
-
-    const urlMatch = trimmedText.match(
-      /https?:\/\/t\.me\/([a-zA-Z0-9_]{5,32})\/?/i,
-    );
-    if (urlMatch) {
-      return urlMatch[0];
-    }
-
-    return null;
+    return this.isNumericOnlyUsername(usernameMatch[1])
+      ? null
+      : usernameMatch[1];
   }
 
-  private isPlainUsername(text: string): boolean {
-    return /^[a-zA-Z0-9_]{5,32}$/.test(text.trim());
+  private isNumericOnlyUsername(username: string): boolean {
+    return /^\d+$/.test(username);
   }
 
   private normalizeDisplayUsername(username: string): string {
@@ -473,7 +434,7 @@ export class BotUpdate {
   ): Promise<void> {
     try {
       const stories =
-        await this.userClientService.getAllUserStories(normalizedUsername);
+        await this.userClientService.getUserStories(normalizedUsername);
 
       if (stories.length === 0) {
         await this.sendHtmlToChat(
@@ -487,17 +448,15 @@ export class BotUpdate {
 
       for (const [index, story] of stories.entries()) {
         try {
-          const downloadResult =
-            await this.userClientService.downloadStoryMedia(story.storyItem);
           await this.sendStoryMediaToChat(
             chatId,
-            downloadResult,
+            story,
             this.formatStoryCaption(story),
           );
           uploadedStoriesCount += 1;
         } catch (error) {
           this.logger.warn(
-            `Story #${story.id} could not be sent for @${normalizedUsername}: ${this.getErrorMessage(error)}`,
+            `Story #${story.storyId} could not be sent for @${normalizedUsername}: ${this.getErrorMessage(error)}`,
           );
         }
 
@@ -560,13 +519,8 @@ export class BotUpdate {
     await this.bot.telegram.sendDocument(chatId, inputFile, { caption });
   }
 
-  private formatStoryCaption(story: StoryMediaItem): string {
-    const flags = [
-      story.isPinned ? 'pinned' : null,
-      story.isExpired ? 'expired' : 'active',
-    ].filter(Boolean);
-
-    return `Story #${story.id} | ${this.formatStoryDate(story.date)}${flags.length > 0 ? ` | ${flags.join(', ')}` : ''}`;
+  private formatStoryCaption(story: StoryDownloadResult): string {
+    return `📅 ${this.formatStoryDate(story.date)} | Story #${story.storyId}`;
   }
 
   private formatStoryDate(unixTimestamp: number): string {

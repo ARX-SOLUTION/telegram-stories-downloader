@@ -1,14 +1,13 @@
-import
-    {
-        BadRequestException,
-        ForbiddenException,
-        HttpException,
-        HttpStatus,
-        Injectable,
-        Logger as NestLogger,
-        NotFoundException,
-        OnModuleInit,
-    } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+  Logger as NestLogger,
+  NotFoundException,
+  OnModuleInit,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -18,14 +17,14 @@ import { Logger as GramJsLogger } from 'telegram/extensions';
 import { LogLevel } from 'telegram/extensions/Logger';
 import { StringSession } from 'telegram/sessions';
 import { USER_CLIENT_API_ROUTES } from './user-client.constants';
-import
-    {
-        LoginFlowResponse,
-        LoginState,
-        StoryDownloadResult,
-        StoryMediaItem,
-        UserClientStatus,
-    } from './user-client.types';
+import {
+  LoginFlowResponse,
+  LoginState,
+  StoryDownloadResult,
+  StoryFetchStatus,
+  StoryMediaItem,
+  UserClientStatus,
+} from './user-client.types';
 
 interface LoginStateWaiter {
   states: Set<LoginState>;
@@ -437,8 +436,12 @@ export class UserClientService implements OnModuleInit {
     const stories = await this.getAllUserStories(username);
     const downloads: StoryDownloadResult[] = [];
 
-    for (const story of stories) {
+    for (const [index, story] of stories.entries()) {
       downloads.push(await this.downloadStoryMedia(story.storyItem));
+
+      if (index < stories.length - 1) {
+        await this.sleep(300);
+      }
     }
 
     return downloads;
@@ -465,6 +468,7 @@ export class UserClientService implements OnModuleInit {
     if (media instanceof Api.MessageMediaPhoto) {
       return {
         storyId: storyItem.id,
+        date: storyItem.date,
         buffer,
         mimeType: 'image/jpeg',
         filename: `story-${storyItem.id}.jpg`,
@@ -479,9 +483,24 @@ export class UserClientService implements OnModuleInit {
 
     return {
       storyId: storyItem.id,
+      date: storyItem.date,
       buffer,
       mimeType,
       filename: this.getStoryFilename(document, storyItem.id),
+    };
+  }
+
+  createStoryFetchStatus(
+    username: string,
+    total: number,
+    downloaded: number,
+    failed: number,
+  ): StoryFetchStatus {
+    return {
+      username: this.normalizeUsername(username),
+      total,
+      downloaded,
+      failed,
     };
   }
 
@@ -697,7 +716,10 @@ export class UserClientService implements OnModuleInit {
       );
     }
 
-    if (!/^[a-zA-Z0-9_]{5,32}$/.test(normalizedUsername)) {
+    if (
+      !/^[a-zA-Z0-9_]{5,32}$/.test(normalizedUsername) ||
+      /^\d+$/.test(normalizedUsername)
+    ) {
       throw new BadRequestException(
         'Username noto‘g‘ri. Masalan: /stories durov',
       );
@@ -958,6 +980,10 @@ export class UserClientService implements OnModuleInit {
       default:
         return '.bin';
     }
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private mapStoryError(error: unknown, normalizedUsername: string): Error {
