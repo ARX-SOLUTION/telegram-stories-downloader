@@ -1,16 +1,36 @@
 import { Body, Controller, Get, Post } from '@nestjs/common';
 import {
-    ChannelDto,
-    SendMessageDto,
-    SubmitCodeDto,
-    SubmitPasswordDto,
-    SubmitPhoneDto,
+  ChannelDto,
+  SendMessageDto,
+  SubmitCodeDto,
+  SubmitPasswordDto,
+  SubmitPhoneDto,
 } from './user-client.dto';
+import { USER_CLIENT_API_BASE_PATH } from './user-client.constants';
 import { UserClientService } from './user-client.service';
 
 @Controller('user-client')
 export class UserClientController {
   constructor(private readonly userClientService: UserClientService) {}
+
+  @Get()
+  getOverview() {
+    const status = this.userClientService.getStatus();
+
+    return {
+      name: 'user-client',
+      basePath: USER_CLIENT_API_BASE_PATH,
+      status,
+      endpoints: {
+        status: `${USER_CLIENT_API_BASE_PATH}/status`,
+        dialogs: `${USER_CLIENT_API_BASE_PATH}/dialogs`,
+        stories: 'Bot command: /stories <username>',
+        sendMessage: `POST ${USER_CLIENT_API_BASE_PATH}/send-message`,
+        joinChannel: `POST ${USER_CLIENT_API_BASE_PATH}/join-channel`,
+        leaveChannel: `POST ${USER_CLIENT_API_BASE_PATH}/leave-channel`,
+      },
+    };
+  }
 
   // ─── Status ───────────────────────────────────────────────────────────────
 

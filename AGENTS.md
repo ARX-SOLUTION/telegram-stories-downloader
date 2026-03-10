@@ -40,10 +40,14 @@ Expected environment variables:
 - `TELEGRAM_API_ID`
 - `TELEGRAM_API_HASH`
 - `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_LOG_LEVEL` (optional)
+- `TELEGRAM_SESSION_STRING` (optional but preferred)
 - `SESSION_FILE`
 
 Notes:
 
+- Prefer `TELEGRAM_SESSION_STRING` when the bot should work without asking end-users to login.
+- Prefer `TELEGRAM_LOG_LEVEL=warn` or `error` in production to avoid noisy GramJS download logs.
 - `SESSION_FILE` is a relative path from the project root unless explicitly changed.
 - The MTProto session is persisted to disk. Avoid breaking this flow when refactoring login logic.
 
@@ -105,7 +109,7 @@ When validating changes, prefer:
 - `/start` should explain the main commands clearly
 - `/help` should describe both chat flow and REST alternatives when relevant
 - `/status` should show current login state and what to do next
-- `/login` should guide the user step-by-step, not just point them to REST
+- Avoid making end-users depend on `/login` when a preconfigured session can be used
 - `/stories <username>` should explain usage clearly when the argument is missing
 - If login is waiting for input, plain text sent in chat may be interpreted as the next login step
 - Keep Telegram replies safe for HTML output; escape dynamic content before rendering

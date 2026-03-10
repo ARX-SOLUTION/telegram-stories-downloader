@@ -4,7 +4,7 @@ import {
   HttpException,
   HttpStatus,
   Injectable,
-  Logger,
+  Logger as NestLogger,
   NotFoundException,
   OnModuleInit,
 } from '@nestjs/common';
@@ -13,6 +13,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Api, TelegramClient } from 'telegram';
 import { NewMessage, NewMessageEvent } from 'telegram/events';
+import { Logger as GramJsLogger } from 'telegram/extensions';
+import { LogLevel } from 'telegram/extensions/Logger';
 import { StringSession } from 'telegram/sessions';
 import { USER_CLIENT_API_ROUTES } from './user-client.constants';
 import {
@@ -30,11 +32,13 @@ interface LoginStateWaiter {
 
 @Injectable()
 export class UserClientService implements OnModuleInit {
-  private readonly logger = new Logger(UserClientService.name);
+  private readonly logger = new NestLogger(UserClientService.name);
 
   private client!: TelegramClient;
   private loginState: LoginState = 'idle';
   private sessionFilePath: string;
+  private readonly configuredSessionString: string;
+  private readonly gramJsLogger: GramJsLogger;
   private lastLoginError: string | null = null;
   private eventHandlersRegistered = false;
   private readonly loginStateWaiters = new Set<LoginStateWaiter>();
@@ -44,6 +48,13 @@ export class UserClientService implements OnModuleInit {
   private passwordResolver: ((value: string) => void) | null = null;
 
   constructor(private readonly config: ConfigService) {
+    this.configuredSessionString =
+      this.config.get<string>('telegram.sessionString')?.trim() ?? '';
+    this.gramJsLogger = new GramJsLogger(
+      this.resolveGramJsLogLevel(
+        this.config.get<string>('telegram.logLevel') ?? 'warn',
+      ),
+    );
     this.sessionFilePath = path.join(
       process.cwd(),
       this.config.get<string>('telegram.sessionFile') ?? 'session.txt',
@@ -59,7 +70,10 @@ export class UserClientService implements OnModuleInit {
       new StringSession(savedSession),
       apiId,
       apiHash,
-      { connectionRetries: 5 },
+      {
+        baseLogger: this.gramJsLogger,
+        connectionRetries: 5,
+      },
     );
 
     await this.client.connect();
@@ -73,11 +87,15 @@ export class UserClientService implements OnModuleInit {
     }
 
     this.logger.warn(
-      `⚠️ User client not authorized. Start via ${USER_CLIENT_API_ROUTES.initiateLogin} or /login`,
+      `⚠️ User client not authorized. Configure TELEGRAM_SESSION_STRING or keep a valid ${this.sessionFilePath} session file. Manual login is only a fallback via ${USER_CLIENT_API_ROUTES.initiateLogin}.`,
     );
   }
 
   private loadSession(): string {
+    if (this.configuredSessionString) {
+      return this.configuredSessionString;
+    }
+
     try {
       if (fs.existsSync(this.sessionFilePath)) {
         return fs.readFileSync(this.sessionFilePath, 'utf-8').trim();
@@ -93,6 +111,24 @@ export class UserClientService implements OnModuleInit {
     const session = this.client.session.save() as unknown as string;
     fs.writeFileSync(this.sessionFilePath, session, 'utf-8');
     this.logger.log(`💾 Session saved to ${this.sessionFilePath}`);
+  }
+
+  private resolveGramJsLogLevel(level: string): LogLevel {
+    const normalizedLevel = level.toLowerCase();
+
+    switch (normalizedLevel) {
+      case 'none':
+        return LogLevel.NONE;
+      case 'error':
+        return LogLevel.ERROR;
+      case 'info':
+        return LogLevel.INFO;
+      case 'debug':
+        return LogLevel.DEBUG;
+      case 'warn':
+      default:
+        return LogLevel.WARN;
+    }
   }
 
   initiateLogin(): LoginFlowResponse {
@@ -292,18 +328,43 @@ export class UserClientService implements OnModuleInit {
     const normalizedUsername = this.normalizeUsername(username);
     const peer = await this.resolveStoryPeer(normalizedUsername);
 
-    let response: Api.stories.PeerStories;
-    try {
-      response = await this.client.invoke(
-        new Api.stories.GetPeerStories({ peer }),
-      );
-    } catch (error) {
-      throw this.mapStoryError(error, normalizedUsername);
+    const sources = await Promise.allSettled([
+      this.getActiveStories(peer),
+      this.getPinnedStories(peer),
+      this.getArchivedStories(peer),
+    ]);
+
+    const storyItems = this.mergeStoryItems(
+      sources.flatMap((source) =>
+        source.status === 'fulfilled' ? source.value : [],
+      ),
+    );
+
+    for (const [index, source] of sources.entries()) {
+      if (source.status === 'rejected') {
+        this.logger.warn(
+          `Story source #${index + 1} failed for @${normalizedUsername}: ${this.getTelegramErrorMessage(
+            source.reason,
+          )}`,
+        );
+      }
     }
 
-    const storyItems = response.stories.stories.filter(
-      (story): story is Api.StoryItem => story instanceof Api.StoryItem,
-    );
+    if (storyItems.length === 0) {
+      const firstRejectedSource = sources.find(
+        (source): source is PromiseRejectedResult =>
+          source.status === 'rejected',
+      );
+
+      if (firstRejectedSource) {
+        throw this.mapStoryError(
+          firstRejectedSource.reason,
+          normalizedUsername,
+        );
+      }
+
+      return [];
+    }
 
     const stories: DownloadedStoryMedia[] = [];
 
@@ -384,7 +445,7 @@ export class UserClientService implements OnModuleInit {
   private getNextAction(state: LoginState): string | undefined {
     switch (state) {
       case 'idle':
-        return `Start login with /login or POST ${USER_CLIENT_API_ROUTES.initiateLogin}.`;
+        return `Bot owner TELEGRAM_SESSION_STRING yoki SESSION_FILE sozlashi kerak. Manual login faqat fallback: /login yoki POST ${USER_CLIENT_API_ROUTES.initiateLogin}.`;
       case 'waiting_phone':
         return `Submit phone via bot chat or POST ${USER_CLIENT_API_ROUTES.submitPhone}.`;
       case 'waiting_code':
@@ -394,7 +455,7 @@ export class UserClientService implements OnModuleInit {
       case 'authorized':
         return `Open dialogs with /dialogs, download stories with /stories <username>, or GET ${USER_CLIENT_API_ROUTES.dialogs}.`;
       case 'error':
-        return `Restart login with /login or POST ${USER_CLIENT_API_ROUTES.initiateLogin}.`;
+        return `User session yaroqsiz. Bot owner sessionni yangilashi kerak. Fallback: /login yoki POST ${USER_CLIENT_API_ROUTES.initiateLogin}.`;
       default:
         return undefined;
     }
@@ -594,6 +655,95 @@ export class UserClientService implements OnModuleInit {
       mimeType,
       filename: this.getStoryFilename(document, normalizedUsername, story.id),
     };
+  }
+
+  private async getActiveStories(
+    peer: Api.TypeInputPeer,
+  ): Promise<Api.StoryItem[]> {
+    const response = await this.client.invoke(
+      new Api.stories.GetPeerStories({ peer }),
+    );
+
+    return this.extractStoryItems(response.stories.stories);
+  }
+
+  private async getPinnedStories(
+    peer: Api.TypeInputPeer,
+  ): Promise<Api.StoryItem[]> {
+    return this.getPagedStories((offsetId, limit) =>
+      this.client.invoke(
+        new Api.stories.GetPinnedStories({
+          peer,
+          offsetId,
+          limit,
+        }),
+      ),
+    );
+  }
+
+  private async getArchivedStories(
+    peer: Api.TypeInputPeer,
+  ): Promise<Api.StoryItem[]> {
+    return this.getPagedStories((offsetId, limit) =>
+      this.client.invoke(
+        new Api.stories.GetStoriesArchive({
+          peer,
+          offsetId,
+          limit,
+        }),
+      ),
+    );
+  }
+
+  private async getPagedStories(
+    pageLoader: (
+      offsetId: number,
+      limit: number,
+    ) => Promise<Api.stories.Stories>,
+    limit = 100,
+  ): Promise<Api.StoryItem[]> {
+    const stories: Api.StoryItem[] = [];
+    const seenOffsets = new Set<number>();
+    let offsetId = 0;
+
+    while (true) {
+      const response = await pageLoader(offsetId, limit);
+      const pageStories = this.extractStoryItems(response.stories);
+
+      if (pageStories.length === 0) {
+        break;
+      }
+
+      stories.push(...pageStories);
+
+      const nextOffsetId = pageStories[pageStories.length - 1].id;
+      if (pageStories.length < limit || seenOffsets.has(nextOffsetId)) {
+        break;
+      }
+
+      seenOffsets.add(nextOffsetId);
+      offsetId = nextOffsetId;
+    }
+
+    return stories;
+  }
+
+  private extractStoryItems(stories: Api.TypeStoryItem[]): Api.StoryItem[] {
+    return stories.filter(
+      (story): story is Api.StoryItem => story instanceof Api.StoryItem,
+    );
+  }
+
+  private mergeStoryItems(stories: Api.StoryItem[]): Api.StoryItem[] {
+    const storyMap = new Map<number, Api.StoryItem>();
+
+    for (const story of stories) {
+      if (!storyMap.has(story.id)) {
+        storyMap.set(story.id, story);
+      }
+    }
+
+    return [...storyMap.values()].sort((left, right) => right.date - left.date);
   }
 
   private async ensureStoryBuffer(downloadedMedia: Buffer | string) {
