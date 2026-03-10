@@ -28,6 +28,9 @@ This project combines:
 | ------------------------------------------- | -------------------------------------- |
 | `src/main.ts`                               | App bootstrap                          |
 | `src/app.module.ts`                         | Root NestJS module                     |
+| `src/database/database.module.ts`           | Drizzle + NeonDB database module       |
+| `src/database/schema.ts`                    | Drizzle schema definitions             |
+| `src/database/user.repository.ts`           | All database reads/writes for users    |
 | `src/bot/bot.update.ts`                     | Bot command and event handlers         |
 | `src/bot/bot.module.ts`                     | Bot NestJS module                      |
 | `src/bot/bot-messages.ts`                   | All user-facing message strings        |
@@ -49,6 +52,7 @@ This project combines:
 | Variable                  | Description                                                          |
 | ------------------------- | -------------------------------------------------------------------- |
 | `PORT`                    | HTTP server port                                                     |
+| `DATABASE_URL`            | NeonDB/PostgreSQL connection string                                  |
 | `TELEGRAM_API_ID`         | MTProto App ID from my.telegram.org                                  |
 | `TELEGRAM_API_HASH`       | MTProto App Hash from my.telegram.org                                |
 | `TELEGRAM_BOT_TOKEN`      | Bot token from @BotFather                                            |
@@ -59,6 +63,7 @@ This project combines:
 Notes:
 
 - `SESSION_FILE` is relative to the project root unless explicitly changed
+- `DATABASE_URL` is required when running the Drizzle-backed user persistence and referral flow
 - The MTProto session is persisted to disk — never break this flow when refactoring login logic
 - Prefer `TELEGRAM_SESSION_STRING` when the bot should run without asking end-users to login
 - Prefer `TELEGRAM_LOG_LEVEL=warn` or `error` in production to reduce noisy GramJS logs
@@ -106,10 +111,17 @@ When validating changes, prefer:
            │                       │
 ┌──────────▼──────────┐ ┌─────────▼──────────────────┐
 │  UserClientService  │ │      ReferralService        │
-│  - MTProto client   │ │  - Track referral counts    │
-│  - Login state      │ │  - Access gate logic        │
-│  - Story fetch      │ │  - Generate referral links  │
+│  - MTProto client   │ │  - Access gate logic        │
+│  - Login state      │ │  - Generate referral links  │
+│  - Story fetch      │ │  - Delegate to repository   │
 │  - Session persist  │ └────────────────────────────┘
+└──────────┬──────────┘
+           │
+┌──────────▼──────────┐
+│    UserRepository   │
+│  - Upsert bot users │
+│  - Referral counts  │
+│  - NeonDB access    │
 └──────────┬──────────┘
            │
 ┌──────────▼──────────┐
@@ -138,11 +150,20 @@ When validating changes, prefer:
 ### Referral Layer
 
 - `ReferralService` is a standalone injectable service
-- It currently uses an in-memory `Map<number, Set<number>>` model — keep the DB replacement note explicit
+- `ReferralService` must delegate persistence to `UserRepository`
 - Free limit: first 5 stories (page 0) always free
 - Page 1+ requires `referralCount >= 5`
 - Self-referral is silently ignored
 - The same referred user must never count twice
+
+### Database Layer
+
+- ORM: Drizzle ORM
+- Provider: NeonDB PostgreSQL
+- Schema lives in `src/database/schema.ts`
+- Connection wiring lives in `src/database/database.module.ts`
+- All database access goes through `UserRepository`
+- Never inject the `DRIZZLE` token directly into handlers or controllers
 
 ### REST Layer
 
@@ -224,6 +245,13 @@ User A's count increases by 1
 When count reaches 5 → User A gains full story access
 ```
 
+### Persistence Rules
+
+- Always upsert the Telegram user on `/start`
+- `UserRepository` is the single source of truth for user rows and referral counters
+- `has_full_access` is persisted in the database and treated as canonical
+- Do not reintroduce in-memory `Map`-based referral state
+
 ### Referral Gate UI Must Include
 
 - Visual progress bar using emoji (`🟩` filled, `⬜️` empty)
@@ -274,6 +302,7 @@ When count reaches 5 → User A gains full story access
 - Do not use one-letter variable names
 - Prefer strict, explicit types for all public service methods
 - Avoid `any` — define a local type when needed
+- All DB access must go through `UserRepository`
 - Keep controller methods thin — delegate to services immediately
 
 ---
@@ -321,6 +350,31 @@ type StoryFetchStatus = {
   failed: number;
 };
 ```
+
+---
+
+## Database
+
+- ORM: Drizzle ORM
+- Provider: NeonDB (PostgreSQL serverless)
+- Schema file: `src/database/schema.ts`
+- DB module: `src/database/database.module.ts`
+- Repository: `src/database/user.repository.ts`
+- Migration output: `./drizzle/`
+- Config: `drizzle.config.ts`
+
+### Migration Commands
+
+- Generate: `npx drizzle-kit generate`
+- Push to DB: `npx drizzle-kit push`
+- Studio UI: `npx drizzle-kit studio`
+
+### Rules
+
+- Never use raw SQL strings in handlers or controllers
+- All DB access goes through `UserRepository`
+- `ReferralService` must use `UserRepository`
+- Always use user upsert on `/start`
 
 ---
 
@@ -467,6 +521,7 @@ Never skip step 1 before committing.
 - Do not use `any` when an obvious local type can be used
 - Do not hardcode reply strings — always use `BotMessages.*`
 - Do not hardcode keyboards — always use `BotKeyboards.*`
+- Do not bypass `UserRepository` for database writes
 - Do not send Telegram replies without `parse_mode: 'HTML'`
 - Do not render dynamic content without `escapeHtml()`
 - Do not merge your own PR without review in a team setting

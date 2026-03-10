@@ -1,5 +1,8 @@
 export default () => ({
   port: parseInt(process.env.PORT ?? '3000', 10),
+  database: {
+    url: process.env.DATABASE_URL ?? '',
+  },
   telegram: {
     apiId: parseInt(process.env.TELEGRAM_API_ID ?? '0', 10),
     apiHash: process.env.TELEGRAM_API_HASH ?? '',
