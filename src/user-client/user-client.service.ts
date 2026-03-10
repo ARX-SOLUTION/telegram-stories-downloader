@@ -6,8 +6,10 @@ import {
   Injectable,
   Logger as NestLogger,
   NotFoundException,
+  OnApplicationShutdown,
   OnModuleInit,
 } from '@nestjs/common';
+import { AdminNotificationService } from '../admin/admin-notification.service';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -44,7 +46,7 @@ class AppGramJsLogger extends GramJsLogger {
 }
 
 @Injectable()
-export class UserClientService implements OnModuleInit {
+export class UserClientService implements OnModuleInit, OnApplicationShutdown {
   private static readonly STORIES_PER_PAGE = 5;
   private readonly logger = new NestLogger(UserClientService.name);
 
@@ -66,7 +68,10 @@ export class UserClientService implements OnModuleInit {
   private passwordResolver: ((value: string) => void) | null = null;
   private passwordRejecter: ((reason?: unknown) => void) | null = null;
 
-  constructor(private readonly config: ConfigService) {
+  constructor(
+    private readonly config: ConfigService,
+    private readonly adminNotificationService: AdminNotificationService,
+  ) {
     this.configuredSessionString =
       this.config.get<string>('telegram.sessionString')?.trim() ?? '';
     this.gramJsLogger = new AppGramJsLogger(
@@ -167,6 +172,10 @@ export class UserClientService implements OnModuleInit {
     }
 
     this.logger.error(`GramJS client error: ${message}`);
+    void this.adminNotificationService.notifyError(
+      new Error(message),
+      'user-client:gramjs-top-level',
+    );
   }
 
   private logTransientGramJsWarning(
@@ -180,6 +189,14 @@ export class UserClientService implements OnModuleInit {
 
     this.lastTransientGramJsWarningAt = now;
     this.logger.warn(message);
+  }
+
+  async onApplicationShutdown(signal?: string): Promise<void> {
+    await this.adminNotificationService.notifyBotStopped(signal);
+
+    if (this.client?.connected) {
+      await this.client.disconnect();
+    }
   }
 
   initiateLogin(): LoginFlowResponse {

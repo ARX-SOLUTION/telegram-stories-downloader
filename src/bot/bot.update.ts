@@ -9,6 +9,7 @@ import {
   Update,
 } from 'nestjs-telegraf';
 import { Input, Markup, Telegraf } from 'telegraf';
+import { AdminNotificationService } from '../admin/admin-notification.service';
 import { BotKeyboards } from './bot-keyboards';
 import { BotMessages } from './bot-messages';
 import { UserRepository } from '../database/user.repository';
@@ -62,6 +63,7 @@ export class BotUpdate {
     private readonly userClientService: UserClientService,
     private readonly referralService: ReferralService,
     private readonly userRepository: UserRepository,
+    private readonly adminNotificationService: AdminNotificationService,
   ) {}
 
   @Start()
@@ -73,7 +75,7 @@ export class BotUpdate {
     }
 
     const existingUser = await this.userRepository.findById(fromUser.id);
-    await this.userRepository.upsertUser({
+    const user = await this.userRepository.upsertUser({
       id: fromUser.id,
       username: fromUser.username ?? null,
       firstName: fromUser.first_name ?? null,
@@ -81,8 +83,14 @@ export class BotUpdate {
       languageCode: fromUser.language_code ?? null,
     });
 
-    const isReferralRegistered =
-      await this.registerReferralFromStartPayload(ctx);
+    if (!existingUser) {
+      await this.adminNotificationService.notifyNewUser(user);
+    }
+
+    const isReferralRegistered = await this.registerReferralFromStartPayload(
+      ctx,
+      user,
+    );
     if (isReferralRegistered) {
       await this.replyHtml(ctx, BotMessages.referralNewUser());
     }
@@ -157,6 +165,11 @@ export class BotUpdate {
 
       await this.replyHtml(ctx, this.buildDialogsMessage(dialogs));
     } catch (error) {
+      await this.adminNotificationService.notifyError(
+        this.toError(error),
+        'bot:dialogs',
+        this.getUserId(ctx) ?? undefined,
+      );
       await this.replyHtml(
         ctx,
         BotMessages.dialogsError(this.escapeHtml(this.getErrorMessage(error))),
@@ -337,6 +350,11 @@ export class BotUpdate {
         this.getReplyMarkup(result.state),
       );
     } catch (error) {
+      await this.adminNotificationService.notifyError(
+        this.toError(error),
+        `bot:login-input:${this.userClientService.getLoginState()}`,
+        this.getUserId(ctx) ?? undefined,
+      );
       await this.replyHtml(
         ctx,
         BotMessages.loginError(this.escapeHtml(this.getErrorMessage(error))),
@@ -488,6 +506,7 @@ export class BotUpdate {
 
   private async registerReferralFromStartPayload(
     ctx: TelegrafContext,
+    user: Awaited<ReturnType<UserRepository['upsertUser']>>,
   ): Promise<boolean> {
     const payload = this.extractStartPayload(ctx.message?.text);
     if (!payload?.startsWith('ref_')) {
@@ -495,13 +514,36 @@ export class BotUpdate {
     }
 
     const referrerId = Number.parseInt(payload.replace('ref_', ''), 10);
-    const newUserId = ctx.from?.id;
-
-    if (!newUserId || Number.isNaN(referrerId)) {
+    if (Number.isNaN(referrerId)) {
       return false;
     }
 
-    return this.referralService.registerReferral(referrerId, newUserId);
+    const isRegistered = await this.referralService.registerReferral(
+      referrerId,
+      user.id,
+    );
+
+    if (!isRegistered) {
+      return false;
+    }
+
+    const referrer = await this.userRepository.findById(referrerId);
+    const referralCount =
+      await this.referralService.getReferralCount(referrerId);
+
+    if (referrer) {
+      await this.adminNotificationService.notifyReferral(
+        referrer,
+        user,
+        referralCount,
+      );
+
+      if (referralCount === ReferralService.REQUIRED_REFERRALS) {
+        await this.adminNotificationService.notifyFullAccessUnlocked(referrer);
+      }
+    }
+
+    return true;
   }
 
   private extractStartPayload(text?: string): string | null {
@@ -536,12 +578,22 @@ export class BotUpdate {
     }
 
     const normalizedUsername = this.normalizeDisplayUsername(username);
+    const user = await this.userRepository.findById(userId);
 
     const referralStatus = await this.referralService.getReferralStatus(userId);
 
     if (page >= 1 && !referralStatus.hasFullAccess) {
       const botUsername = await this.getBotUsername(ctx);
       const referralLink = this.buildReferralLink(userId, botUsername);
+
+      if (user) {
+        await this.adminNotificationService.notifyReferralGateHit(
+          user,
+          normalizedUsername,
+          referralStatus.referralCount,
+        );
+      }
+
       await this.replyHtml(
         ctx,
         this.buildReferralGateMessage(referralStatus, referralLink),
@@ -555,7 +607,7 @@ export class BotUpdate {
       BotMessages.storyLoading(this.escapeHtml(normalizedUsername), page),
     );
 
-    void this.processStoriesRequest(chatId, normalizedUsername, page);
+    void this.processStoriesRequest(chatId, normalizedUsername, page, userId);
   }
 
   private extractStoriesUsername(text?: string): string | null {
@@ -600,6 +652,7 @@ export class BotUpdate {
     chatId: number,
     normalizedUsername: string,
     page: number,
+    actorUserId: number,
   ): Promise<void> {
     try {
       const result = await this.userClientService.getUserStoriesPaginated(
@@ -643,6 +696,23 @@ export class BotUpdate {
         return;
       }
 
+      await this.userRepository.logStoryDownloadSession({
+        userId: actorUserId,
+        targetUsername: normalizedUsername,
+        page,
+        storyCount: uploadedStoriesCount,
+      });
+
+      const actorUser = await this.userRepository.findById(actorUserId);
+      if (actorUser) {
+        await this.adminNotificationService.notifyStoryDownload(
+          actorUser,
+          normalizedUsername,
+          page,
+          uploadedStoriesCount,
+        );
+      }
+
       const startIndex = page * BotUpdate.STORIES_PER_PAGE + 1;
       const endIndex = startIndex + result.stories.length - 1;
       const paginationKeyboard = this.buildPaginationKeyboard(
@@ -667,6 +737,11 @@ export class BotUpdate {
     } catch (error) {
       this.logger.error(
         `Story download failed for @${normalizedUsername}: ${this.getErrorMessage(error)}`,
+      );
+      await this.adminNotificationService.notifyError(
+        this.toError(error),
+        `bot:stories:@${normalizedUsername}:page:${page}`,
+        actorUserId,
       );
       await this.sendHtmlToChat(
         chatId,
@@ -903,6 +978,12 @@ export class BotUpdate {
 
   private getErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : 'Noma’lum xatolik';
+  }
+
+  private toError(error: unknown): Error {
+    return error instanceof Error
+      ? error
+      : new Error(typeof error === 'string' ? error : 'Noma’lum xatolik');
   }
 
   private extractFloodWaitSeconds(message: string): number | null {

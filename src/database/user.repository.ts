@@ -1,9 +1,16 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, isNull, sql } from 'drizzle-orm';
+import { and, eq, gte, isNotNull, isNull, sql } from 'drizzle-orm';
 import { NeonHttpDatabase } from 'drizzle-orm/neon-http';
+import { DailyStats } from '../admin/admin.types';
 import { DRIZZLE } from './database.constants';
 import * as schema from './schema';
-import { UpsertTelegramUserInput, User, users } from './schema';
+import {
+  LogStoryDownloadSessionInput,
+  storyDownloadSessions,
+  UpsertTelegramUserInput,
+  User,
+  users,
+} from './schema';
 
 @Injectable()
 export class UserRepository {
@@ -107,5 +114,77 @@ export class UserRepository {
       .from(users);
 
     return Number(result?.count ?? 0);
+  }
+
+  async logStoryDownloadSession(
+    data: LogStoryDownloadSessionInput,
+  ): Promise<void> {
+    await this.db.insert(storyDownloadSessions).values({
+      userId: data.userId,
+      targetUsername: data.targetUsername,
+      page: data.page,
+      storyCount: data.storyCount,
+    });
+  }
+
+  async getDailyStats(): Promise<DailyStats> {
+    const dayStart = this.getTashkentDayStart();
+
+    const [
+      totalUsersResult,
+      newUsersTodayResult,
+      usersWithFullAccessResult,
+      downloadsTodayResult,
+      totalSessionsResult,
+      referralsTodayResult,
+      totalReferralsResult,
+    ] = await Promise.all([
+      this.db.select({ count: sql<number>`count(*)` }).from(users),
+      this.db
+        .select({ count: sql<number>`count(*)` })
+        .from(users)
+        .where(gte(users.firstSeenAt, dayStart)),
+      this.db
+        .select({ count: sql<number>`count(*)` })
+        .from(users)
+        .where(eq(users.hasFullAccess, true)),
+      this.db
+        .select({
+          total: sql<number>`coalesce(sum(${storyDownloadSessions.storyCount}), 0)`,
+        })
+        .from(storyDownloadSessions)
+        .where(gte(storyDownloadSessions.createdAt, dayStart)),
+      this.db
+        .select({ count: sql<number>`count(*)` })
+        .from(storyDownloadSessions),
+      this.db
+        .select({ count: sql<number>`count(*)` })
+        .from(users)
+        .where(
+          and(isNotNull(users.referredBy), gte(users.firstSeenAt, dayStart)),
+        ),
+      this.db
+        .select({ count: sql<number>`count(*)` })
+        .from(users)
+        .where(isNotNull(users.referredBy)),
+    ]);
+
+    return {
+      totalUsers: Number(totalUsersResult[0]?.count ?? 0),
+      newUsersToday: Number(newUsersTodayResult[0]?.count ?? 0),
+      usersWithFullAccess: Number(usersWithFullAccessResult[0]?.count ?? 0),
+      downloadsToday: Number(downloadsTodayResult[0]?.total ?? 0),
+      totalSessions: Number(totalSessionsResult[0]?.count ?? 0),
+      referralsToday: Number(referralsTodayResult[0]?.count ?? 0),
+      totalReferrals: Number(totalReferralsResult[0]?.count ?? 0),
+    };
+  }
+
+  private getTashkentDayStart(referenceDate = new Date()): Date {
+    const tashkentOffsetMs = 5 * 60 * 60 * 1000;
+    const shiftedDate = new Date(referenceDate.getTime() + tashkentOffsetMs);
+    shiftedDate.setUTCHours(0, 0, 0, 0);
+
+    return new Date(shiftedDate.getTime() - tashkentOffsetMs);
   }
 }

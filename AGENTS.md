@@ -35,6 +35,9 @@ This project combines:
 | `src/bot/bot.module.ts`                     | Bot NestJS module                      |
 | `src/bot/bot-messages.ts`                   | All user-facing message strings        |
 | `src/bot/bot-keyboards.ts`                  | All inline keyboard definitions        |
+| `src/admin/admin.module.ts`                 | Admin notification module              |
+| `src/admin/admin-notification.service.ts`   | Admin Telegram notifications           |
+| `src/admin/admin-stats.service.ts`          | Scheduled admin stats sender           |
 | `src/user-client/user-client.service.ts`    | MTProto client lifecycle + story logic |
 | `src/user-client/user-client.controller.ts` | REST endpoints for user client         |
 | `src/user-client/user-client.dto.ts`        | Request/response DTOs                  |
@@ -52,6 +55,7 @@ This project combines:
 | Variable                  | Description                                                          |
 | ------------------------- | -------------------------------------------------------------------- |
 | `PORT`                    | HTTP server port                                                     |
+| `ADMIN_TELEGRAM_ID`       | Optional Telegram user ID for admin notifications                    |
 | `DATABASE_URL`            | NeonDB/PostgreSQL connection string                                  |
 | `TELEGRAM_API_ID`         | MTProto App ID from my.telegram.org                                  |
 | `TELEGRAM_API_HASH`       | MTProto App Hash from my.telegram.org                                |
@@ -63,6 +67,7 @@ This project combines:
 Notes:
 
 - `SESSION_FILE` is relative to the project root unless explicitly changed
+- `ADMIN_TELEGRAM_ID` is optional; when omitted, admin notifications are skipped safely
 - `DATABASE_URL` is required when running the Drizzle-backed user persistence and referral flow
 - The MTProto session is persisted to disk — never break this flow when refactoring login logic
 - Prefer `TELEGRAM_SESSION_STRING` when the bot should run without asking end-users to login
@@ -163,7 +168,14 @@ When validating changes, prefer:
 - Schema lives in `src/database/schema.ts`
 - Connection wiring lives in `src/database/database.module.ts`
 - All database access goes through `UserRepository`
+- Story download sessions are logged via `UserRepository` for admin stats
 - Never inject the `DRIZZLE` token directly into handlers or controllers
+
+### Admin Layer
+
+- `AdminNotificationService` sends Telegram alerts for new users, referrals, downloads, errors, and lifecycle events
+- `AdminStatsService` sends daily stats in the `Asia/Tashkent` timezone
+- Admin notifications must never crash the app; failures are logged and swallowed
 
 ### REST Layer
 

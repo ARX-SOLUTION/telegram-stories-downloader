@@ -3,6 +3,7 @@ import {
   boolean,
   integer,
   pgTable,
+  serial,
   timestamp,
   varchar,
 } from 'drizzle-orm/pg-core';
@@ -24,7 +25,21 @@ export const users = pgTable('users', {
     .notNull(),
 });
 
+export const storyDownloadSessions = pgTable('story_download_sessions', {
+  id: serial('id').primaryKey(),
+  userId: bigint('user_id', { mode: 'number' })
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  targetUsername: varchar('target_username', { length: 64 }).notNull(),
+  page: integer('page').notNull(),
+  storyCount: integer('story_count').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+});
+
 export type User = typeof users.$inferSelect;
+export type StoryDownloadSession = typeof storyDownloadSessions.$inferSelect;
 
 export interface UpsertTelegramUserInput {
   id: number;
@@ -32,4 +47,11 @@ export interface UpsertTelegramUserInput {
   firstName?: string | null;
   lastName?: string | null;
   languageCode?: string | null;
+}
+
+export interface LogStoryDownloadSessionInput {
+  userId: number;
+  targetUsername: string;
+  page: number;
+  storyCount: number;
 }
