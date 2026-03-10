@@ -1,13 +1,14 @@
-import {
-  BadRequestException,
-  ForbiddenException,
-  HttpException,
-  HttpStatus,
-  Injectable,
-  Logger as NestLogger,
-  NotFoundException,
-  OnModuleInit,
-} from '@nestjs/common';
+import
+    {
+        BadRequestException,
+        ForbiddenException,
+        HttpException,
+        HttpStatus,
+        Injectable,
+        Logger as NestLogger,
+        NotFoundException,
+        OnModuleInit,
+    } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -17,18 +18,29 @@ import { Logger as GramJsLogger } from 'telegram/extensions';
 import { LogLevel } from 'telegram/extensions/Logger';
 import { StringSession } from 'telegram/sessions';
 import { USER_CLIENT_API_ROUTES } from './user-client.constants';
-import {
-  LoginFlowResponse,
-  LoginState,
-  StoryDownloadResult,
-  StoryMediaItem,
-  UserClientStatus,
-} from './user-client.types';
+import
+    {
+        LoginFlowResponse,
+        LoginState,
+        StoryDownloadResult,
+        StoryMediaItem,
+        UserClientStatus,
+    } from './user-client.types';
 
 interface LoginStateWaiter {
   states: Set<LoginState>;
   resolve: (state: LoginState | null) => void;
   timer: NodeJS.Timeout;
+}
+
+class AppGramJsLogger extends GramJsLogger {
+  override canSend(level: LogLevel): boolean {
+    if (level === LogLevel.ERROR) {
+      return false;
+    }
+
+    return super.canSend(level);
+  }
 }
 
 @Injectable()
@@ -42,6 +54,7 @@ export class UserClientService implements OnModuleInit {
   private readonly gramJsLogger: GramJsLogger;
   private lastLoginError: string | null = null;
   private eventHandlersRegistered = false;
+  private lastTransientGramJsWarningAt = 0;
   private readonly loginStateWaiters = new Set<LoginStateWaiter>();
 
   private phoneResolver: ((value: string) => void) | null = null;
@@ -51,7 +64,7 @@ export class UserClientService implements OnModuleInit {
   constructor(private readonly config: ConfigService) {
     this.configuredSessionString =
       this.config.get<string>('telegram.sessionString')?.trim() ?? '';
-    this.gramJsLogger = new GramJsLogger(
+    this.gramJsLogger = new AppGramJsLogger(
       this.resolveGramJsLogLevel(
         this.config.get<string>('telegram.logLevel') ?? 'warn',
       ),
@@ -76,6 +89,8 @@ export class UserClientService implements OnModuleInit {
         connectionRetries: 5,
       },
     );
+    this.client.onError = (error) =>
+      Promise.resolve(this.handleTopLevelGramJsError(error));
 
     await this.client.connect();
 
@@ -130,6 +145,36 @@ export class UserClientService implements OnModuleInit {
       default:
         return LogLevel.WARN;
     }
+  }
+
+  private handleTopLevelGramJsError(error: Error): void {
+    const message = this.getTelegramErrorMessage(error);
+
+    if (
+      message === 'TIMEOUT' ||
+      message.includes('TIMEOUT') ||
+      message.includes('Cannot send requests while disconnected')
+    ) {
+      this.logTransientGramJsWarning(
+        'GramJS ulanishi qisqa uzildi. Client qayta ulanmoqda.',
+      );
+      return;
+    }
+
+    this.logger.error(`GramJS client error: ${message}`);
+  }
+
+  private logTransientGramJsWarning(
+    message: string,
+    cooldownMs = 5 * 60 * 1000,
+  ): void {
+    const now = Date.now();
+    if (now - this.lastTransientGramJsWarningAt < cooldownMs) {
+      return;
+    }
+
+    this.lastTransientGramJsWarningAt = now;
+    this.logger.warn(message);
   }
 
   initiateLogin(): LoginFlowResponse {
