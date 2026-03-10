@@ -322,10 +322,8 @@ export const BotMessages = {
           `📊 Taklif qilganlar: <b>${clampReferralCount(count)}/${REFERRAL_GOAL}</b>`,
           `👥 Yana kerak: <b>${REFERRAL_GOAL - clampReferralCount(count)}</b> ta do‘st`,
           '',
-          '🔗 <b>Havolangiz:</b>',
-          `<code>${link}</code>`,
-          '',
-          '📤 Pastdagi tugma orqali ulashing.',
+          link ? '🔗 Taklif havolangiz pastdagi tugmalarda tayyor.' : '',
+          '📤 Ulashish yoki nusxalash uchun tugmalardan foydalaning.',
         ].join('\n'),
 
   referralSuccess: (count: number) =>
@@ -344,11 +342,13 @@ export const BotMessages = {
 
   referralCopy: (link: string) =>
     [
-      '🔗 <b>Sizning havolangiz</b>',
+      '🔗 <b>Taklif havolangiz tayyor</b>',
       '',
-      `<code>${link}</code>`,
+      'Linkni chiroyli ko‘rinishda ulashish uchun pastdagi tugmalardan foydalaning.',
       '',
-      '👆 Ustiga bosing — nusxalash oson bo‘ladi.',
+      `<a href="${link}">Taklif havolasini ochish</a>`,
+      '',
+      '📋 Nusxalash kerak bo‘lsa, havolani bosib ushlab turing.',
     ].join('\n'),
 
   referralContinue: () =>
