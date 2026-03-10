@@ -9,6 +9,7 @@ import {
   Update,
 } from 'nestjs-telegraf';
 import { Input, Markup, Telegraf } from 'telegraf';
+import { BotKeyboards } from './bot-keyboards';
 import { BotMessages } from './bot-messages';
 import { ReferralService } from '../referral/referral.service';
 import { UserClientService } from '../user-client/user-client.service';
@@ -27,6 +28,7 @@ interface TelegrafContext {
   botInfo?: { username?: string };
   match?: RegExpExecArray;
   reply: (text: string, extra?: object) => Promise<unknown>;
+  editMessageText?: (text: string, extra?: object) => Promise<unknown>;
   replyWithDocument: (document: object, extra?: object) => Promise<unknown>;
   replyWithPhoto: (photo: object, extra?: object) => Promise<unknown>;
   replyWithVideo: (video: object, extra?: object) => Promise<unknown>;
@@ -159,9 +161,11 @@ export class BotUpdate {
     }
 
     const botUsername = await this.getBotUsername(ctx);
+    const referralLink = this.buildReferralLink(userId, botUsername);
     await this.replyHtml(
       ctx,
-      this.buildReferralStatusMessage(userId, botUsername),
+      this.buildReferralStatusMessage(userId, referralLink),
+      this.buildReferralStatusMarkup(userId, referralLink),
     );
   }
 
@@ -178,6 +182,64 @@ export class BotUpdate {
 
     await ctx.answerCbQuery?.(BotMessages.pageLoading(page));
     await this.handleStoriesRequest(ctx, username, page);
+  }
+
+  @Action('referral_status')
+  async onReferralStatusAction(ctx: TelegrafContext): Promise<void> {
+    const userId = this.getUserId(ctx);
+    if (!userId) {
+      await ctx.answerCbQuery?.(BotMessages.pageInvalid());
+      return;
+    }
+
+    await ctx.answerCbQuery?.(BotMessages.referralStatusToast());
+
+    const botUsername = await this.getBotUsername(ctx);
+    const referralLink = this.buildReferralLink(userId, botUsername);
+
+    if (this.referralService.hasAccess(userId)) {
+      await this.editHtml(
+        ctx,
+        BotMessages.referralSuccess(
+          this.referralService.getReferralCount(userId),
+        ),
+        BotKeyboards.referralSuccess(),
+      );
+      return;
+    }
+
+    await this.editHtml(
+      ctx,
+      this.buildReferralGateMessage(userId, referralLink),
+      BotKeyboards.referralGate(
+        referralLink,
+        this.referralService.getReferralCount(userId),
+      ),
+    );
+  }
+
+  @Action('referral_copy')
+  async onReferralCopyAction(ctx: TelegrafContext): Promise<void> {
+    const userId = this.getUserId(ctx);
+    if (!userId) {
+      await ctx.answerCbQuery?.(BotMessages.pageInvalid());
+      return;
+    }
+
+    const botUsername = await this.getBotUsername(ctx);
+    const referralLink = this.buildReferralLink(userId, botUsername);
+
+    await ctx.answerCbQuery?.(BotMessages.referralCopyToast());
+    await this.replyHtml(
+      ctx,
+      BotMessages.referralCopy(this.escapeHtml(referralLink)),
+    );
+  }
+
+  @Action('referral_continue')
+  async onReferralContinueAction(ctx: TelegrafContext): Promise<void> {
+    await ctx.answerCbQuery?.(BotMessages.referralContinueToast());
+    await this.editHtml(ctx, BotMessages.referralContinue());
   }
 
   @On('contact')
@@ -376,6 +438,30 @@ export class BotUpdate {
     });
   }
 
+  private async editHtml(
+    ctx: TelegrafContext,
+    text: string,
+    extra: object = {},
+  ): Promise<void> {
+    if (!ctx.editMessageText) {
+      await this.replyHtml(ctx, text, extra);
+      return;
+    }
+
+    try {
+      await ctx.editMessageText(text, {
+        parse_mode: 'HTML',
+        ...extra,
+      });
+    } catch (error) {
+      if (this.getErrorMessage(error).includes('message is not modified')) {
+        return;
+      }
+
+      throw error;
+    }
+  }
+
   private registerReferralFromStartPayload(ctx: TelegrafContext): boolean {
     const payload = this.extractStartPayload(ctx.message?.text);
     if (!payload?.startsWith('ref_')) {
@@ -427,9 +513,14 @@ export class BotUpdate {
 
     if (page >= 1 && !this.referralService.hasAccess(userId)) {
       const botUsername = await this.getBotUsername(ctx);
+      const referralLink = this.buildReferralLink(userId, botUsername);
       await this.replyHtml(
         ctx,
-        this.buildReferralGateMessage(userId, botUsername),
+        this.buildReferralGateMessage(userId, referralLink),
+        BotKeyboards.referralGate(
+          referralLink,
+          this.referralService.getReferralCount(userId),
+        ),
       );
       return;
     }
@@ -665,13 +756,13 @@ export class BotUpdate {
 
   private buildReferralStatusMessage(
     userId: number,
-    botUsername: string,
+    referralLink: string,
   ): string {
     const referralCount = this.referralService.getReferralCount(userId);
-    const referralLink = this.referralService.generateReferralLink(
-      userId,
-      this.escapeHtml(botUsername),
-    );
+
+    if (this.referralService.hasAccess(userId)) {
+      return BotMessages.referralSuccess(referralCount);
+    }
 
     return BotMessages.referralStatus(
       referralCount,
@@ -679,23 +770,33 @@ export class BotUpdate {
     );
   }
 
+  private buildReferralStatusMarkup(
+    userId: number,
+    referralLink: string,
+  ): object {
+    const referralCount = this.referralService.getReferralCount(userId);
+
+    if (this.referralService.hasAccess(userId)) {
+      return BotKeyboards.referralSuccess();
+    }
+
+    return BotKeyboards.referralStatus(referralLink, referralCount);
+  }
+
   private buildReferralGateMessage(
     userId: number,
-    botUsername: string,
+    referralLink: string,
   ): string {
     const referralCount = this.referralService.getReferralCount(userId);
-    const remainingReferrals =
-      this.referralService.getRemainingReferrals(userId);
-    const referralLink = this.referralService.generateReferralLink(
-      userId,
-      this.escapeHtml(botUsername),
-    );
 
     return BotMessages.referralGate(
       referralCount,
-      remainingReferrals,
       this.escapeHtml(referralLink),
     );
+  }
+
+  private buildReferralLink(userId: number, botUsername: string): string {
+    return this.referralService.generateReferralLink(userId, botUsername);
   }
 
   private async getBotUsername(ctx: TelegrafContext): Promise<string> {
