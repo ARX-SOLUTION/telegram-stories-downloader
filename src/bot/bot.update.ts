@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { HttpException, Injectable, Logger } from '@nestjs/common';
 import {
   Action,
   Command,
@@ -9,15 +9,14 @@ import {
   Update,
 } from 'nestjs-telegraf';
 import { Input, Markup, Telegraf } from 'telegraf';
+import { BotMessages } from './bot-messages';
 import { ReferralService } from '../referral/referral.service';
 import { UserClientService } from '../user-client/user-client.service';
-import { USER_CLIENT_API_ROUTES } from '../user-client/user-client.constants';
 import {
   LoginFlowResponse,
   LoginState,
   PaginatedStoriesResult,
   StoryDownloadResult,
-  UserClientStatus,
 } from '../user-client/user-client.types';
 
 interface TelegrafContext {
@@ -45,6 +44,7 @@ export class BotUpdate {
   private readonly logger = new Logger(BotUpdate.name);
   private activeLoginChatId: number | null = null;
   private botUsername: string | null = null;
+  private readonly seenUsers = new Set<number>();
 
   constructor(
     @InjectBot() private readonly bot: Telegraf,
@@ -54,17 +54,25 @@ export class BotUpdate {
 
   @Start()
   async onStart(ctx: TelegrafContext): Promise<void> {
-    const name = ctx.from?.first_name ?? 'do‘st';
+    const userId = this.getUserId(ctx);
+    const isReturning = userId !== null && this.seenUsers.has(userId);
+    if (userId !== null) {
+      this.seenUsers.add(userId);
+    }
+
     const isReferralRegistered = this.registerReferralFromStartPayload(ctx);
-    await this.replyHtml(
-      ctx,
-      this.formatStartMessage(name, isReferralRegistered),
-    );
+    if (isReferralRegistered) {
+      await this.replyHtml(ctx, BotMessages.referralNewUser());
+    }
+
+    const botUsername = await this.getBotUsername(ctx);
+    await this.replyHtml(ctx, BotMessages.start(isReturning, botUsername));
   }
 
   @Help()
   async onHelp(ctx: TelegrafContext): Promise<void> {
-    await this.replyHtml(ctx, this.formatHelpMessage());
+    const botUsername = await this.getBotUsername(ctx);
+    await this.replyHtml(ctx, BotMessages.help(botUsername));
   }
 
   @Command('status')
@@ -72,7 +80,10 @@ export class BotUpdate {
     const status = this.userClientService.getStatus();
     await this.replyHtml(
       ctx,
-      this.formatStatusMessage(status),
+      BotMessages.status(
+        status.loginState,
+        status.phoneNumber ? this.escapeHtml(status.phoneNumber) : null,
+      ),
       this.getReplyMarkup(status.loginState),
     );
   }
@@ -82,10 +93,7 @@ export class BotUpdate {
     const chatId = this.getChatId(ctx);
 
     if (this.isLoginLockedToAnotherChat(chatId)) {
-      await this.replyHtml(
-        ctx,
-        '🔒 <b>Login band</b>\n\nLogin jarayoni boshqa chatda davom etyapti.',
-      );
+      await this.replyHtml(ctx, BotMessages.loginLocked());
       return;
     }
 
@@ -94,7 +102,20 @@ export class BotUpdate {
 
     await this.replyHtml(
       ctx,
-      this.formatLoginFlowMessage(result),
+      this.buildLoginFlowMessage(result),
+      this.getReplyMarkup(result.state),
+    );
+  }
+
+  @Command('cancel')
+  async onCancel(ctx: TelegrafContext): Promise<void> {
+    const result = this.userClientService.cancelLogin();
+    this.captureLoginChat(this.getChatId(ctx), result.state);
+    await this.replyHtml(
+      ctx,
+      result.message === 'Login cancelled.'
+        ? BotMessages.loginCancelled()
+        : BotMessages.loginInactive(),
       this.getReplyMarkup(result.state),
     );
   }
@@ -105,17 +126,15 @@ export class BotUpdate {
       const dialogs = await this.userClientService.getDialogs();
 
       if (dialogs.length === 0) {
-        await this.replyHtml(ctx, '📭 <b>Dialoglar topilmadi</b>');
+        await this.replyHtml(ctx, BotMessages.dialogsEmpty());
         return;
       }
 
-      await this.replyHtml(ctx, this.formatDialogsMessage(dialogs));
+      await this.replyHtml(ctx, this.buildDialogsMessage(dialogs));
     } catch (error) {
       await this.replyHtml(
         ctx,
-        `❌ <b>Dialoglarni olish olmadi</b>\n\n${this.escapeHtml(this.getErrorMessage(error))}\n\n${this.getStatePrompt(
-          this.userClientService.getLoginState(),
-        )}`,
+        BotMessages.dialogsError(this.escapeHtml(this.getErrorMessage(error))),
       );
     }
   }
@@ -124,10 +143,7 @@ export class BotUpdate {
   async onStories(ctx: TelegrafContext): Promise<void> {
     const username = this.extractStoriesUsername(ctx.message?.text);
     if (!username) {
-      await this.replyHtml(
-        ctx,
-        'ℹ️ <b>Foydalanish</b>\n\n<code>/stories @username</code>\nYoki oddiy username yuboring:\n<code>durov</code>\n<code>@durov</code>\n<code>https://t.me/durov</code>',
-      );
+      await this.replyHtml(ctx, BotMessages.usageStories());
       return;
     }
 
@@ -138,14 +154,14 @@ export class BotUpdate {
   async onReferral(ctx: TelegrafContext): Promise<void> {
     const userId = ctx.from?.id;
     if (!userId) {
-      await this.replyHtml(ctx, '❌ <b>Foydalanuvchi aniqlanmadi</b>');
+      await this.replyHtml(ctx, BotMessages.userNotDetected());
       return;
     }
 
     const botUsername = await this.getBotUsername(ctx);
     await this.replyHtml(
       ctx,
-      this.formatReferralStatusMessage(userId, botUsername),
+      this.buildReferralStatusMessage(userId, botUsername),
     );
   }
 
@@ -156,11 +172,11 @@ export class BotUpdate {
     const page = Number.parseInt(pageRaw ?? '', 10);
 
     if (!username || Number.isNaN(page)) {
-      await ctx.answerCbQuery?.('Sahifa ma’lumoti noto‘g‘ri.');
+      await ctx.answerCbQuery?.(BotMessages.pageInvalid());
       return;
     }
 
-    await ctx.answerCbQuery?.(`📄 ${page + 1}-sahifa yuklanmoqda...`);
+    await ctx.answerCbQuery?.(BotMessages.pageLoading(page));
     await this.handleStoriesRequest(ctx, username, page);
   }
 
@@ -172,10 +188,7 @@ export class BotUpdate {
     }
 
     if (!this.shouldHandleLoginInput(ctx)) {
-      await this.replyHtml(
-        ctx,
-        'ℹ️ <b>Kontakt qabul qilinmadi</b>\n\nInteraktiv login yoqilmagan. End-user login qilmaydi.',
-      );
+      await this.replyHtml(ctx, BotMessages.contactIgnored());
       return;
     }
 
@@ -226,10 +239,7 @@ export class BotUpdate {
           result = await this.userClientService.submitPassword(value);
           break;
         default:
-          await this.replyHtml(
-            ctx,
-            'ℹ️ <b>Login aktiv emas</b>\n\nEnd-user login qilmaydi. Kerak bo‘lsa admin sessionni yangilaydi.',
-          );
+          await this.replyHtml(ctx, BotMessages.loginInactive());
           return;
       }
 
@@ -237,138 +247,55 @@ export class BotUpdate {
 
       await this.replyHtml(
         ctx,
-        this.formatLoginFlowMessage(result),
+        this.buildLoginFlowMessage(result),
         this.getReplyMarkup(result.state),
       );
     } catch (error) {
-      const currentState = this.userClientService.getLoginState();
       await this.replyHtml(
         ctx,
-        `❌ <b>Xatolik</b>\n\n${this.escapeHtml(this.getErrorMessage(error))}\n\n${this.getStatePrompt(
-          currentState,
-        )}`,
-        this.getReplyMarkup(currentState),
+        BotMessages.loginError(this.escapeHtml(this.getErrorMessage(error))),
+        this.getReplyMarkup(this.userClientService.getLoginState()),
       );
     }
   }
 
-  private formatStartMessage(name: string, referred = false): string {
-    const lines = [
-      `👋 <b>Salom, ${this.escapeHtml(name)}!</b>`,
-      '',
-      'Men Telegram Bot + User Bot yordamchisiman.',
-      '',
-      '<b>Buyruqlar</b>',
-      '/start — boshlang‘ich xabar',
-      '/help — foydalanish bo‘yicha yordam',
-      '/status — user-client holati',
-      '/dialogs — so‘nggi chatlar',
-      '/stories @username — storylarni yuklash (5 ta bepul)',
-      '/referral — referal holatini ko‘rish',
-      'username yuboring — barcha storylarni yuklash',
-      '',
-      'ℹ️ Birinchi 5 ta story bepul. Ko‘proq olish uchun 5 ta do‘st taklif qiling.',
-    ];
+  private buildLoginFlowMessage(result: LoginFlowResponse): string {
+    const phoneNumber = this.userClientService.getStatus().phoneNumber;
+    const escapedPhoneNumber = phoneNumber
+      ? this.escapeHtml(phoneNumber)
+      : undefined;
 
-    if (referred) {
-      lines.splice(
-        3,
-        0,
-        '🎉 Siz do‘stingizning taklif havolasi orqali qo‘shildingiz.',
-        '',
-      );
+    if (result.message === 'Login cancelled.') {
+      return BotMessages.loginCancelled();
     }
 
-    return lines.join('\n');
+    if (
+      result.state === 'authorized' &&
+      result.message.toLowerCase().includes('already authorized')
+    ) {
+      return BotMessages.loginAlreadyAuthorized();
+    }
+
+    switch (result.state) {
+      case 'waiting_phone':
+        return BotMessages.loginStart();
+      case 'waiting_code':
+        return BotMessages.loginWaitingCode(escapedPhoneNumber);
+      case 'waiting_password':
+        return BotMessages.loginWaitingPassword();
+      case 'authorized':
+        return BotMessages.loginSuccess();
+      case 'error':
+        return BotMessages.loginError(
+          this.escapeHtml(result.lastError ?? result.message),
+        );
+      case 'idle':
+      default:
+        return BotMessages.loginInactive();
+    }
   }
 
-  private formatHelpMessage(): string {
-    return [
-      '📘 <b>Yordam</b>',
-      '',
-      '<b>Story yuklash</b>',
-      '<code>/stories @durov</code>',
-      'Oddiy username yuboring:',
-      '<code>durov</code>',
-      '<code>@durov</code>',
-      '<code>https://t.me/durov</code>',
-      'Bot storylarni eng yangisidan boshlab 5 tadan yuboradi.',
-      'Birinchi 5 ta story bepul.',
-      '',
-      '<b>Referal</b>',
-      '<code>/referral</code>',
-      'Ko‘proq story ochish uchun 5 ta do‘st taklif qiling.',
-      '',
-      '<b>Session</b>',
-      'End-user login qilmaydi.',
-      'Bot owner serverda <code>TELEGRAM_SESSION_STRING</code> yoki <code>SESSION_FILE</code> sozlashi kerak.',
-      '',
-      '<b>REST API</b>',
-      `POST <code>${USER_CLIENT_API_ROUTES.initiateLogin}</code>`,
-      `POST <code>${USER_CLIENT_API_ROUTES.submitPhone}</code>`,
-      `POST <code>${USER_CLIENT_API_ROUTES.submitCode}</code>`,
-      `POST <code>${USER_CLIENT_API_ROUTES.submitPassword}</code>`,
-      `GET <code>${USER_CLIENT_API_ROUTES.status}</code>`,
-      `GET <code>${USER_CLIENT_API_ROUTES.dialogs}</code>`,
-    ].join('\n');
-  }
-
-  private formatStatusMessage(status: UserClientStatus): string {
-    const icon =
-      status.loginState === 'authorized'
-        ? '✅'
-        : status.loginState === 'error'
-          ? '❌'
-          : '⚠️';
-
-    const lines = [
-      `${icon} <b>User Client Status</b>`,
-      '',
-      `Holat: <code>${status.loginState}</code>`,
-      `Ulangan: ${status.connected ? 'Ha' : 'Yo‘q'}`,
-      `Ruxsat: ${status.authorized ? 'Ha' : 'Yo‘q'}`,
-    ];
-
-    if (status.lastError) {
-      lines.push(
-        '',
-        `Oxirgi xatolik: <code>${this.escapeHtml(status.lastError)}</code>`,
-      );
-    }
-
-    const prompt = this.getStatePrompt(status.loginState);
-    if (prompt) {
-      lines.push('', prompt);
-    }
-
-    return lines.join('\n');
-  }
-
-  private formatLoginFlowMessage(result: LoginFlowResponse): string {
-    const lines = [
-      '🔐 <b>Login Flow</b>',
-      '',
-      `Holat: <code>${result.state}</code>`,
-      '',
-      this.escapeHtml(result.message),
-    ];
-
-    if (result.lastError) {
-      lines.push(
-        '',
-        `Xatolik: <code>${this.escapeHtml(result.lastError)}</code>`,
-      );
-    }
-
-    const prompt = this.getStatePrompt(result.state);
-    if (prompt) {
-      lines.push('', prompt);
-    }
-
-    return lines.join('\n');
-  }
-
-  private formatDialogsMessage(
+  private buildDialogsMessage(
     dialogs: { id: string; name: string; username: string }[],
   ): string {
     const lines = dialogs.slice(0, 20).map((dialog, index) => {
@@ -380,26 +307,46 @@ export class BotUpdate {
       return `${index + 1}. ${name} — ${target}`;
     });
 
-    return ['📋 <b>So‘nggi dialoglar</b>', '', ...lines].join('\n');
+    return BotMessages.dialogs(lines);
   }
 
-  private getStatePrompt(state: LoginState): string {
-    switch (state) {
-      case 'idle':
-        return 'Bot owner sessionni sozlashi kerak. End-user login shart emas.';
-      case 'waiting_phone':
-        return 'Telefon raqamingizni <code>+998901234567</code> ko‘rinishida yuboring yoki pastdagi tugmani bosing.';
-      case 'waiting_code':
-        return 'Telegram yuborgan kodni shu chatga yuboring. Masalan: <code>12345</code>';
-      case 'waiting_password':
-        return '2 bosqichli parolni shu chatga yuboring.';
-      case 'authorized':
-        return 'Akkaunt ulandi. Endi <code>/dialogs</code>, <code>/stories</code>, <code>/referral</code> va <code>/status</code> ishlaydi.';
-      case 'error':
-        return 'Session bilan muammo bor. Bot owner sessionni yangilashi kerak.';
-      default:
-        return '';
+  private buildStoryErrorMessage(error: unknown, username: string): string {
+    const escapedUsername = this.escapeHtml(username);
+
+    if (error instanceof HttpException) {
+      const status = error.getStatus();
+
+      if (status === 404) {
+        return BotMessages.storyUserNotFound(escapedUsername);
+      }
+
+      if (status === 403) {
+        return BotMessages.storyPrivateAccount(escapedUsername);
+      }
+
+      if (status === 429) {
+        return BotMessages.storyFloodWait(
+          this.extractFloodWaitSeconds(error.message) ?? 60,
+        );
+      }
+
+      if (status === 401) {
+        return BotMessages.storyNotAuthorized();
+      }
     }
+
+    const message = this.getErrorMessage(error);
+    if (
+      message.includes('FLOOD_WAIT') ||
+      message.includes('A wait of') ||
+      message.includes('FLOOD_PREMIUM_WAIT')
+    ) {
+      return BotMessages.storyFloodWait(
+        this.extractFloodWaitSeconds(message) ?? 60,
+      );
+    }
+
+    return BotMessages.unknownError();
   }
 
   private getReplyMarkup(state: LoginState): object {
@@ -460,22 +407,19 @@ export class BotUpdate {
     page = 0,
   ): Promise<void> {
     if (!this.userClientService.isAuthorized()) {
-      await this.replyHtml(
-        ctx,
-        '🔒 <b>User session tayyor emas</b>\n\nEnd-user login qilmaydi. Bot owner serverda <code>TELEGRAM_SESSION_STRING</code> yoki <code>SESSION_FILE</code> sozlashi kerak.',
-      );
+      await this.replyHtml(ctx, BotMessages.storyNotAuthorized());
       return;
     }
 
     const chatId = this.getChatId(ctx);
     if (!chatId) {
-      await this.replyHtml(ctx, '❌ <b>Chat aniqlanmadi</b>');
+      await this.replyHtml(ctx, BotMessages.chatNotDetected());
       return;
     }
 
     const userId = this.getUserId(ctx);
     if (!userId) {
-      await this.replyHtml(ctx, '❌ <b>Foydalanuvchi aniqlanmadi</b>');
+      await this.replyHtml(ctx, BotMessages.userNotDetected());
       return;
     }
 
@@ -485,16 +429,14 @@ export class BotUpdate {
       const botUsername = await this.getBotUsername(ctx);
       await this.replyHtml(
         ctx,
-        this.formatReferralGateMessage(userId, botUsername),
+        this.buildReferralGateMessage(userId, botUsername),
       );
       return;
     }
 
     await this.replyHtml(
       ctx,
-      `⏳ <b>@${this.escapeHtml(
-        normalizedUsername,
-      )} — ${page + 1}-sahifa yuklanmoqda...</b>`,
+      BotMessages.storyLoading(this.escapeHtml(normalizedUsername), page),
     );
 
     void this.processStoriesRequest(chatId, normalizedUsername, page);
@@ -550,7 +492,10 @@ export class BotUpdate {
       );
 
       if (result.stories.length === 0) {
-        await this.sendHtmlToChat(chatId, '⚠️ Bu foydalanuvchida story yo‘q');
+        await this.sendHtmlToChat(
+          chatId,
+          BotMessages.storyEmpty(this.escapeHtml(normalizedUsername)),
+        );
         return;
       }
 
@@ -578,10 +523,7 @@ export class BotUpdate {
       }
 
       if (uploadedStoriesCount === 0) {
-        await this.sendHtmlToChat(
-          chatId,
-          `❌ <b>Xatolik</b>\n\n${this.escapeHtml(`@${normalizedUsername} storylarini yuborib bo‘lmadi.`)}`,
-        );
+        await this.sendHtmlToChat(chatId, BotMessages.unknownError());
         return;
       }
 
@@ -593,18 +535,17 @@ export class BotUpdate {
         result,
       );
 
-      const summaryLines = [
-        `✅ <b>${startIndex}–${endIndex}</b> ta story yuklandi`,
-        `📦 Jami: <b>${result.total}</b> ta story`,
-      ];
-
-      if (failedStoriesCount > 0) {
-        summaryLines.push(`⚠️ Yuborilmadi: <b>${failedStoriesCount}</b> ta`);
-      }
-
       await this.sendHtmlToChat(
         chatId,
-        summaryLines.join('\n'),
+        BotMessages.storyPageDone(
+          this.escapeHtml(normalizedUsername),
+          page,
+          result.pagesCount,
+          startIndex,
+          endIndex,
+          result.total,
+          failedStoriesCount,
+        ),
         paginationKeyboard ? { reply_markup: paginationKeyboard } : {},
       );
     } catch (error) {
@@ -613,7 +554,7 @@ export class BotUpdate {
       );
       await this.sendHtmlToChat(
         chatId,
-        `❌ <b>Xatolik</b>\n\n${this.escapeHtml(this.getErrorMessage(error))}`,
+        this.buildStoryErrorMessage(error, normalizedUsername),
       );
     }
   }
@@ -637,21 +578,33 @@ export class BotUpdate {
     const inputFile = Input.fromBuffer(story.buffer, story.filename);
 
     if (story.mimeType.startsWith('image/')) {
-      await this.bot.telegram.sendPhoto(chatId, inputFile, { caption });
+      await this.bot.telegram.sendPhoto(chatId, inputFile, {
+        caption,
+        parse_mode: 'HTML',
+      });
       return;
     }
 
     if (story.mimeType.startsWith('video/')) {
       if (story.buffer.length > BotUpdate.TELEGRAM_VIDEO_LIMIT_BYTES) {
-        await this.bot.telegram.sendDocument(chatId, inputFile, { caption });
+        await this.bot.telegram.sendDocument(chatId, inputFile, {
+          caption,
+          parse_mode: 'HTML',
+        });
         return;
       }
 
-      await this.bot.telegram.sendVideo(chatId, inputFile, { caption });
+      await this.bot.telegram.sendVideo(chatId, inputFile, {
+        caption,
+        parse_mode: 'HTML',
+      });
       return;
     }
 
-    await this.bot.telegram.sendDocument(chatId, inputFile, { caption });
+    await this.bot.telegram.sendDocument(chatId, inputFile, {
+      caption,
+      parse_mode: 'HTML',
+    });
   }
 
   private formatStoryCaption(
@@ -659,7 +612,12 @@ export class BotUpdate {
     page: number,
     pagesCount: number,
   ): string {
-    return `📅 ${this.formatStoryDate(story.date)} | Story #${story.storyId} | Sahifa ${page + 1}/${pagesCount || 1}`;
+    return BotMessages.storyCaption(
+      this.formatStoryDate(story.date),
+      story.storyId,
+      page,
+      pagesCount,
+    );
   }
 
   private formatStoryDate(unixTimestamp: number): string {
@@ -705,32 +663,23 @@ export class BotUpdate {
     return { inline_keyboard: [buttons] };
   }
 
-  private formatReferralStatusMessage(
+  private buildReferralStatusMessage(
     userId: number,
     botUsername: string,
   ): string {
     const referralCount = this.referralService.getReferralCount(userId);
-    const remainingReferrals =
-      this.referralService.getRemainingReferrals(userId);
     const referralLink = this.referralService.generateReferralLink(
       userId,
-      botUsername,
+      this.escapeHtml(botUsername),
     );
 
-    return [
-      '👥 <b>Referal holati</b>',
-      '',
-      `✅ Taklif qilganlar: <b>${referralCount}/${ReferralService.REQUIRED_REFERRALS}</b>`,
-      remainingReferrals > 0
-        ? `⚠️ Ko‘proq story uchun yana <b>${remainingReferrals} ta</b> do‘st kerak`
-        : '🎉 Siz barcha sahifalarni ochishingiz mumkin!',
-      '',
-      '🔗 Sizning havolangiz:',
-      `<code>${this.escapeHtml(referralLink)}</code>`,
-    ].join('\n');
+    return BotMessages.referralStatus(
+      referralCount,
+      this.escapeHtml(referralLink),
+    );
   }
 
-  private formatReferralGateMessage(
+  private buildReferralGateMessage(
     userId: number,
     botUsername: string,
   ): string {
@@ -739,19 +688,14 @@ export class BotUpdate {
       this.referralService.getRemainingReferrals(userId);
     const referralLink = this.referralService.generateReferralLink(
       userId,
-      botUsername,
+      this.escapeHtml(botUsername),
     );
 
-    return [
-      `🔒 Ko‘proq story yuklab olish uchun <b>${remainingReferrals} ta</b> do‘st taklif qiling!`,
-      '',
-      `👥 Sizning referallaringiz: <b>${referralCount}/${ReferralService.REQUIRED_REFERRALS}</b>`,
-      '',
-      '🔗 Taklif havolangiz:',
-      `<code>${this.escapeHtml(referralLink)}</code>`,
-      '',
-      'Do‘stlaringiz shu havola orqali botga kirsa, hisoblanadi ✅',
-    ].join('\n');
+    return BotMessages.referralGate(
+      referralCount,
+      remainingReferrals,
+      this.escapeHtml(referralLink),
+    );
   }
 
   private async getBotUsername(ctx: TelegrafContext): Promise<string> {
@@ -836,6 +780,15 @@ export class BotUpdate {
 
   private getErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : 'Noma’lum xatolik';
+  }
+
+  private extractFloodWaitSeconds(message: string): number | null {
+    const match = message.match(
+      /(?:FLOOD(?:_PREMIUM)?_WAIT_?|\bwait of )(\d+)/i,
+    );
+    const seconds = match?.[1] ? Number.parseInt(match[1], 10) : Number.NaN;
+
+    return Number.isNaN(seconds) ? null : seconds;
   }
 
   private escapeHtml(value: string): string {

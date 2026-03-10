@@ -54,13 +54,17 @@ export class UserClientService implements OnModuleInit {
   private readonly configuredSessionString: string;
   private readonly gramJsLogger: GramJsLogger;
   private lastLoginError: string | null = null;
+  private currentPhoneNumber: string | null = null;
   private eventHandlersRegistered = false;
   private lastTransientGramJsWarningAt = 0;
   private readonly loginStateWaiters = new Set<LoginStateWaiter>();
 
   private phoneResolver: ((value: string) => void) | null = null;
+  private phoneRejecter: ((reason?: unknown) => void) | null = null;
   private codeResolver: ((value: string) => void) | null = null;
+  private codeRejecter: ((reason?: unknown) => void) | null = null;
   private passwordResolver: ((value: string) => void) | null = null;
+  private passwordRejecter: ((reason?: unknown) => void) | null = null;
 
   constructor(private readonly config: ConfigService) {
     this.configuredSessionString =
@@ -194,14 +198,16 @@ export class UserClientService implements OnModuleInit {
     }
 
     this.lastLoginError = null;
+    this.currentPhoneNumber = null;
     this.clearLoginResolvers();
     this.setLoginState('waiting_phone');
 
     void this.client
       .start({
         phoneNumber: () =>
-          new Promise<string>((resolve) => {
+          new Promise<string>((resolve, reject) => {
             this.phoneResolver = resolve;
+            this.phoneRejecter = reject;
           }),
         phoneCode: () => {
           this.setLoginState('waiting_code');
@@ -209,8 +215,9 @@ export class UserClientService implements OnModuleInit {
             `📱 Code requested — submit via ${USER_CLIENT_API_ROUTES.submitCode} or bot chat`,
           );
 
-          return new Promise<string>((resolve) => {
+          return new Promise<string>((resolve, reject) => {
             this.codeResolver = resolve;
+            this.codeRejecter = reject;
           });
         },
         password: () => {
@@ -219,8 +226,9 @@ export class UserClientService implements OnModuleInit {
             `🔐 2FA password requested — submit via ${USER_CLIENT_API_ROUTES.submitPassword} or bot chat`,
           );
 
-          return new Promise<string>((resolve) => {
+          return new Promise<string>((resolve, reject) => {
             this.passwordResolver = resolve;
+            this.passwordRejecter = reject;
           });
         },
         onError: (error) => Promise.resolve(this.handleLoginFailure(error)),
@@ -253,6 +261,8 @@ export class UserClientService implements OnModuleInit {
 
     this.phoneResolver(normalizedPhoneNumber);
     this.phoneResolver = null;
+    this.phoneRejecter = null;
+    this.currentPhoneNumber = normalizedPhoneNumber;
     this.setLoginState('waiting_code');
 
     const nextState = await this.waitForAnyLoginState([
@@ -279,6 +289,7 @@ export class UserClientService implements OnModuleInit {
 
     this.codeResolver(normalizedCode);
     this.codeResolver = null;
+    this.codeRejecter = null;
 
     const nextState = await this.waitForAnyLoginState([
       'waiting_password',
@@ -306,6 +317,7 @@ export class UserClientService implements OnModuleInit {
 
     this.passwordResolver(normalizedPassword);
     this.passwordResolver = null;
+    this.passwordRejecter = null;
 
     const nextState = await this.waitForAnyLoginState(['authorized', 'error']);
 
@@ -320,6 +332,7 @@ export class UserClientService implements OnModuleInit {
       loginState: this.loginState,
       connected: !!this.client?.connected,
       authorized: this.loginState === 'authorized',
+      phoneNumber: this.currentPhoneNumber,
       nextAction: this.getNextAction(this.loginState),
       lastError: this.lastLoginError,
     };
@@ -331,6 +344,27 @@ export class UserClientService implements OnModuleInit {
 
   isAuthorized(): boolean {
     return this.loginState === 'authorized';
+  }
+
+  cancelLogin(): LoginFlowResponse {
+    if (!this.isWaitingForLoginInput()) {
+      return this.createLoginFlowResponse(
+        this.loginState,
+        'Login is not currently waiting for input.',
+      );
+    }
+
+    const cancelError = new Error('AUTH_USER_CANCEL');
+    this.phoneRejecter?.(cancelError);
+    this.codeRejecter?.(cancelError);
+    this.passwordRejecter?.(cancelError);
+
+    this.currentPhoneNumber = null;
+    this.lastLoginError = null;
+    this.clearLoginResolvers();
+    this.setLoginState('idle');
+
+    return this.createLoginFlowResponse('idle', 'Login cancelled.');
   }
 
   isWaitingForLoginInput(): boolean {
@@ -697,8 +731,11 @@ export class UserClientService implements OnModuleInit {
 
   private clearLoginResolvers() {
     this.phoneResolver = null;
+    this.phoneRejecter = null;
     this.codeResolver = null;
+    this.codeRejecter = null;
     this.passwordResolver = null;
+    this.passwordRejecter = null;
   }
 
   private normalizePhoneNumber(phoneNumber: string): string {
