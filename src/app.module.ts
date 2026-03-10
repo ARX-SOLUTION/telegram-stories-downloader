@@ -5,6 +5,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { BotModule } from './bot/bot.module';
 import configuration from './config/configuration';
+import { DatabaseModule } from './database/database.module';
 import { UserClientModule } from './user-client/user-client.module';
 
 @Module({
@@ -26,6 +27,9 @@ import { UserClientModule } from './user-client/user-client.module';
       }),
       inject: [ConfigService],
     }),
+
+    // ── Database (Drizzle ORM + NeonDB) ─────────────────────────────────────
+    DatabaseModule,
 
     // ── User bot (MTProto via gramjs) ───────────────────────────────────────
     UserClientModule,

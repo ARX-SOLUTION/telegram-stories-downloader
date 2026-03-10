@@ -11,7 +11,11 @@ import {
 import { Input, Markup, Telegraf } from 'telegraf';
 import { BotKeyboards } from './bot-keyboards';
 import { BotMessages } from './bot-messages';
-import { ReferralService } from '../referral/referral.service';
+import { UserRepository } from '../database/user.repository';
+import {
+  ReferralAccessStatus,
+  ReferralService,
+} from '../referral/referral.service';
 import { UserClientService } from '../user-client/user-client.service';
 import {
   LoginFlowResponse,
@@ -22,7 +26,13 @@ import {
 
 interface TelegrafContext {
   chat?: { id: number };
-  from?: { id: number; username?: string; first_name?: string };
+  from?: {
+    id: number;
+    username?: string;
+    first_name?: string;
+    last_name?: string;
+    language_code?: string;
+  };
   message?: { text?: string; contact?: { phone_number: string } };
   callbackQuery?: { data?: string; message?: { chat?: { id: number } } };
   botInfo?: { username?: string };
@@ -46,29 +56,42 @@ export class BotUpdate {
   private readonly logger = new Logger(BotUpdate.name);
   private activeLoginChatId: number | null = null;
   private botUsername: string | null = null;
-  private readonly seenUsers = new Set<number>();
 
   constructor(
     @InjectBot() private readonly bot: Telegraf,
     private readonly userClientService: UserClientService,
     private readonly referralService: ReferralService,
+    private readonly userRepository: UserRepository,
   ) {}
 
   @Start()
   async onStart(ctx: TelegrafContext): Promise<void> {
-    const userId = this.getUserId(ctx);
-    const isReturning = userId !== null && this.seenUsers.has(userId);
-    if (userId !== null) {
-      this.seenUsers.add(userId);
+    const fromUser = ctx.from;
+    if (!fromUser) {
+      await this.replyHtml(ctx, BotMessages.userNotDetected());
+      return;
     }
 
-    const isReferralRegistered = this.registerReferralFromStartPayload(ctx);
+    const existingUser = await this.userRepository.findById(fromUser.id);
+    await this.userRepository.upsertUser({
+      id: fromUser.id,
+      username: fromUser.username ?? null,
+      firstName: fromUser.first_name ?? null,
+      lastName: fromUser.last_name ?? null,
+      languageCode: fromUser.language_code ?? null,
+    });
+
+    const isReferralRegistered =
+      await this.registerReferralFromStartPayload(ctx);
     if (isReferralRegistered) {
       await this.replyHtml(ctx, BotMessages.referralNewUser());
     }
 
     const botUsername = await this.getBotUsername(ctx);
-    await this.replyHtml(ctx, BotMessages.start(isReturning, botUsername));
+    await this.replyHtml(
+      ctx,
+      BotMessages.start(Boolean(existingUser), botUsername),
+    );
   }
 
   @Help()
@@ -162,10 +185,11 @@ export class BotUpdate {
 
     const botUsername = await this.getBotUsername(ctx);
     const referralLink = this.buildReferralLink(userId, botUsername);
+    const referralStatus = await this.referralService.getReferralStatus(userId);
     await this.replyHtml(
       ctx,
-      this.buildReferralStatusMessage(userId, referralLink),
-      this.buildReferralStatusMarkup(userId, referralLink),
+      this.buildReferralStatusMessage(referralStatus, referralLink),
+      this.buildReferralStatusMarkup(referralStatus, referralLink),
     );
   }
 
@@ -196,13 +220,12 @@ export class BotUpdate {
 
     const botUsername = await this.getBotUsername(ctx);
     const referralLink = this.buildReferralLink(userId, botUsername);
+    const referralStatus = await this.referralService.getReferralStatus(userId);
 
-    if (this.referralService.hasAccess(userId)) {
+    if (referralStatus.hasFullAccess) {
       await this.editHtml(
         ctx,
-        BotMessages.referralSuccess(
-          this.referralService.getReferralCount(userId),
-        ),
+        BotMessages.referralSuccess(referralStatus.referralCount),
         BotKeyboards.referralSuccess(),
       );
       return;
@@ -210,11 +233,8 @@ export class BotUpdate {
 
     await this.editHtml(
       ctx,
-      this.buildReferralGateMessage(userId, referralLink),
-      BotKeyboards.referralGate(
-        referralLink,
-        this.referralService.getReferralCount(userId),
-      ),
+      this.buildReferralGateMessage(referralStatus, referralLink),
+      BotKeyboards.referralGate(referralLink, referralStatus.referralCount),
     );
   }
 
@@ -466,7 +486,9 @@ export class BotUpdate {
     }
   }
 
-  private registerReferralFromStartPayload(ctx: TelegrafContext): boolean {
+  private async registerReferralFromStartPayload(
+    ctx: TelegrafContext,
+  ): Promise<boolean> {
     const payload = this.extractStartPayload(ctx.message?.text);
     if (!payload?.startsWith('ref_')) {
       return false;
@@ -515,16 +537,15 @@ export class BotUpdate {
 
     const normalizedUsername = this.normalizeDisplayUsername(username);
 
-    if (page >= 1 && !this.referralService.hasAccess(userId)) {
+    const referralStatus = await this.referralService.getReferralStatus(userId);
+
+    if (page >= 1 && !referralStatus.hasFullAccess) {
       const botUsername = await this.getBotUsername(ctx);
       const referralLink = this.buildReferralLink(userId, botUsername);
       await this.replyHtml(
         ctx,
-        this.buildReferralGateMessage(userId, referralLink),
-        BotKeyboards.referralGate(
-          referralLink,
-          this.referralService.getReferralCount(userId),
-        ),
+        this.buildReferralGateMessage(referralStatus, referralLink),
+        BotKeyboards.referralGate(referralLink, referralStatus.referralCount),
       );
       return;
     }
@@ -759,42 +780,39 @@ export class BotUpdate {
   }
 
   private buildReferralStatusMessage(
-    userId: number,
+    referralStatus: ReferralAccessStatus,
     referralLink: string,
   ): string {
-    const referralCount = this.referralService.getReferralCount(userId);
-
-    if (this.referralService.hasAccess(userId)) {
-      return BotMessages.referralSuccess(referralCount);
+    if (referralStatus.hasFullAccess) {
+      return BotMessages.referralSuccess(referralStatus.referralCount);
     }
 
     return BotMessages.referralStatus(
-      referralCount,
+      referralStatus.referralCount,
       this.escapeHtml(referralLink),
     );
   }
 
   private buildReferralStatusMarkup(
-    userId: number,
+    referralStatus: ReferralAccessStatus,
     referralLink: string,
   ): object {
-    const referralCount = this.referralService.getReferralCount(userId);
-
-    if (this.referralService.hasAccess(userId)) {
+    if (referralStatus.hasFullAccess) {
       return BotKeyboards.referralSuccess();
     }
 
-    return BotKeyboards.referralStatus(referralLink, referralCount);
+    return BotKeyboards.referralStatus(
+      referralLink,
+      referralStatus.referralCount,
+    );
   }
 
   private buildReferralGateMessage(
-    userId: number,
+    referralStatus: ReferralAccessStatus,
     referralLink: string,
   ): string {
-    const referralCount = this.referralService.getReferralCount(userId);
-
     return BotMessages.referralGate(
-      referralCount,
+      referralStatus.referralCount,
       this.escapeHtml(referralLink),
     );
   }

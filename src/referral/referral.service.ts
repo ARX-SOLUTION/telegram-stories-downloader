@@ -1,52 +1,47 @@
 import { Injectable } from '@nestjs/common';
+import { UserRepository } from '../database/user.repository';
+
+export interface ReferralAccessStatus {
+  referralCount: number;
+  hasFullAccess: boolean;
+  remainingReferrals: number;
+}
 
 @Injectable()
 export class ReferralService {
   static readonly REQUIRED_REFERRALS = 5;
 
-  private readonly referrals = new Map<number, Set<number>>();
-  private readonly referredBy = new Map<number, number>();
+  constructor(private readonly userRepository: UserRepository) {}
 
-  // TODO: Replace in-memory storage with persistent DB storage.
-  getReferralCount(userId: number): number {
-    return this.referrals.get(userId)?.size ?? 0;
+  async getReferralCount(userId: number): Promise<number> {
+    return this.userRepository.getReferralCount(userId);
   }
 
-  registerReferral(referrerId: number, newUserId: number): boolean {
-    if (
-      !Number.isSafeInteger(referrerId) ||
-      !Number.isSafeInteger(newUserId) ||
-      referrerId <= 0 ||
-      newUserId <= 0 ||
-      referrerId === newUserId ||
-      this.referredBy.has(newUserId)
-    ) {
-      return false;
-    }
-
-    if (!this.referrals.has(referrerId)) {
-      this.referrals.set(referrerId, new Set());
-    }
-
-    const referrals = this.referrals.get(referrerId);
-    if (!referrals || referrals.has(newUserId)) {
-      return false;
-    }
-
-    referrals.add(newUserId);
-    this.referredBy.set(newUserId, referrerId);
-    return true;
+  async registerReferral(
+    referrerId: number,
+    newUserId: number,
+  ): Promise<boolean> {
+    return this.userRepository.registerReferral(referrerId, newUserId);
   }
 
-  hasAccess(userId: number): boolean {
-    return this.getReferralCount(userId) >= ReferralService.REQUIRED_REFERRALS;
+  async hasAccess(userId: number): Promise<boolean> {
+    return this.userRepository.hasFullAccess(userId);
   }
 
-  getRemainingReferrals(userId: number): number {
-    return Math.max(
-      0,
-      ReferralService.REQUIRED_REFERRALS - this.getReferralCount(userId),
-    );
+  async getReferralStatus(userId: number): Promise<ReferralAccessStatus> {
+    const referralCount = await this.getReferralCount(userId);
+    const hasFullAccess =
+      referralCount >= ReferralService.REQUIRED_REFERRALS ||
+      (await this.hasAccess(userId));
+
+    return {
+      referralCount,
+      hasFullAccess,
+      remainingReferrals: Math.max(
+        0,
+        ReferralService.REQUIRED_REFERRALS - referralCount,
+      ),
+    };
   }
 
   generateReferralLink(userId: number, botUsername: string): string {
