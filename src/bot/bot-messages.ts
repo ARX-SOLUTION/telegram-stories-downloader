@@ -1,5 +1,16 @@
 import { LoginState } from '../user-client/user-client.types';
 
+const REFERRAL_GOAL = 5;
+
+function clampReferralCount(count: number): number {
+  return Math.max(0, Math.min(count, REFERRAL_GOAL));
+}
+
+function buildReferralBar(count: number): string {
+  const safeCount = clampReferralCount(count);
+  return `${'🟩'.repeat(safeCount)}${'⬜️'.repeat(REFERRAL_GOAL - safeCount)}`;
+}
+
 export const BotMessages = {
   start: (isReturning: boolean, botUsername?: string) =>
     isReturning
@@ -260,27 +271,43 @@ export const BotMessages = {
       '▶️ Kirish: <code>/login</code>',
     ].join('\n'),
 
-  referralGate: (current: number, needed: number, link: string) =>
-    [
-      '🔒 <b>Ko‘proq story uchun do‘st taklif qiling</b>',
+  referralGate: (current: number, link: string) => {
+    const safeCount = clampReferralCount(current);
+    const needed = REFERRAL_GOAL - safeCount;
+    const percent = Math.round((safeCount / REFERRAL_GOAL) * 100);
+
+    return [
+      '🔒 <b>Qo‘shimcha story yuklash yopiq</b>',
       '',
-      `📊 Holat: <b>${current}/5</b> ta taklif`,
-      `👥 Yana kerak: <b>${needed}</b> ta do‘st`,
+      '━━━━━━━━━━━━━━━━━',
+      `${buildReferralBar(safeCount)}  <b>${percent}%</b>`,
+      '━━━━━━━━━━━━━━━━━',
       '',
-      '🔗 <b>Sizning havolangiz:</b>',
-      `<code>${link}</code>`,
+      `👥 Do‘stlar: <b>${safeCount}/${REFERRAL_GOAL}</b> ta taklif`,
+      `🎯 Maqsad: yana <b>${needed}</b> ta do‘st kerak`,
       '',
-      '✅ Do‘stlaringiz shu havola orqali botga kirsa — hisoblanadi!',
+      '💡 <b>Nima qilish kerak?</b>',
+      'Quyidagi <b>Ulashish</b> tugmasini bosing.',
+      'Do‘stlaringizni tanlang va yuboring.',
+      'Ular botga kirsa — hisoblanadi ✅',
       '',
-      '📈 Holatni ko‘rish: <code>/referral</code>',
-    ].join('\n'),
+      link ? '🔗 Taklif havolangiz pastdagi tugmalarda tayyor.' : '',
+      '🎁 <b>5 ta to‘lsa:</b> cheksiz story yuklash!',
+    ]
+      .filter(Boolean)
+      .join('\n');
+  },
 
   referralStatus: (count: number, link: string) =>
-    count >= 5
+    count >= REFERRAL_GOAL
       ? [
           '🎉 <b>Referal maqsadiga yetdingiz!</b>',
           '',
-          `✅ Taklif qilganlar: <b>${count}/5</b>`,
+          '━━━━━━━━━━━━━━━━━',
+          `🟩🟩🟩🟩🟩  <b>100%</b>`,
+          '━━━━━━━━━━━━━━━━━',
+          '',
+          `✅ Taklif qilganlar: <b>${count}/${REFERRAL_GOAL}</b>`,
           '🔓 Barcha story sahifalari ochiq.',
           '',
           '📥 <code>@username</code> yuboring!',
@@ -288,15 +315,55 @@ export const BotMessages = {
       : [
           '👥 <b>Referal holati</b>',
           '',
-          `📊 Taklif qilganlar: <b>${count}/5</b>`,
-          `${'🟩'.repeat(count)}${'⬜️'.repeat(5 - count)}`,
-          `👥 Yana kerak: <b>${5 - count}</b> ta do‘st`,
+          '━━━━━━━━━━━━━━━━━',
+          `${buildReferralBar(count)}  <b>${Math.round((clampReferralCount(count) / REFERRAL_GOAL) * 100)}%</b>`,
+          '━━━━━━━━━━━━━━━━━',
+          '',
+          `📊 Taklif qilganlar: <b>${clampReferralCount(count)}/${REFERRAL_GOAL}</b>`,
+          `👥 Yana kerak: <b>${REFERRAL_GOAL - clampReferralCount(count)}</b> ta do‘st`,
           '',
           '🔗 <b>Havolangiz:</b>',
           `<code>${link}</code>`,
           '',
-          '📥 5 ta to‘lsa — keyingi sahifalar ochiladi!',
+          '📤 Pastdagi tugma orqali ulashing.',
         ].join('\n'),
+
+  referralSuccess: (count: number) =>
+    [
+      '🎉 <b>Maqsadga yetdingiz!</b>',
+      '',
+      '━━━━━━━━━━━━━━━━━',
+      '🟩🟩🟩🟩🟩  <b>100%</b>',
+      '━━━━━━━━━━━━━━━━━',
+      '',
+      `👥 Taklif qilganlar: <b>${count}/${REFERRAL_GOAL}</b> ✅`,
+      '',
+      '🔓 <b>Barcha storylarga kirish ochiq!</b>',
+      '📥 Davom etish uchun tugmani bosing.',
+    ].join('\n'),
+
+  referralCopy: (link: string) =>
+    [
+      '🔗 <b>Sizning havolangiz</b>',
+      '',
+      `<code>${link}</code>`,
+      '',
+      '👆 Ustiga bosing — nusxalash oson bo‘ladi.',
+    ].join('\n'),
+
+  referralContinue: () =>
+    [
+      '✅ <b>Cheksiz yuklash faollashdi!</b>',
+      '',
+      '📥 Endi keyingi sahifalarni ham ochishingiz mumkin.',
+      '<code>@username</code> yuboring — davom etamiz!',
+    ].join('\n'),
+
+  referralStatusToast: () => '📊 Holat yangilanmoqda...',
+
+  referralCopyToast: () => '✅ Havola tayyor.',
+
+  referralContinueToast: () => '🎉 Ruxsat faollashdi.',
 
   referralNewUser: () =>
     [
