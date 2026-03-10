@@ -233,6 +233,10 @@ export class BotUpdate {
     await this.replyHtml(
       ctx,
       BotMessages.referralCopy(this.escapeHtml(referralLink)),
+      {
+        ...BotKeyboards.referralCopy(referralLink),
+        disable_web_page_preview: true,
+      },
     );
   }
 
