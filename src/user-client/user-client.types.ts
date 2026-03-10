@@ -46,3 +46,11 @@ export interface StoryFetchStatus {
   downloaded: number;
   failed: number;
 }
+
+export interface PaginatedStoriesResult {
+  stories: StoryDownloadResult[];
+  page: number;
+  total: number;
+  hasMore: boolean;
+  pagesCount: number;
+}
