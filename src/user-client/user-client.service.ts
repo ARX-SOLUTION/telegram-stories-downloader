@@ -327,12 +327,30 @@ export class UserClientService implements OnModuleInit {
 
     const normalizedUsername = this.normalizeUsername(username);
     const peer = await this.resolveStoryPeer(normalizedUsername);
+    const storySources = [
+      {
+        label: 'active',
+        optional: false,
+        loader: () => this.getActiveStories(peer),
+      },
+      {
+        label: 'pinned',
+        optional: true,
+        loader: () => this.getPinnedStories(peer),
+      },
+    ];
 
-    const sources = await Promise.allSettled([
-      this.getActiveStories(peer),
-      this.getPinnedStories(peer),
-      this.getArchivedStories(peer),
-    ]);
+    if (this.canFetchStoriesArchive(peer)) {
+      storySources.push({
+        label: 'archive',
+        optional: true,
+        loader: () => this.getArchivedStories(peer),
+      });
+    }
+
+    const sources = await Promise.allSettled(
+      storySources.map((source) => source.loader()),
+    );
 
     const storyItems = this.mergeStoryItems(
       sources.flatMap((source) =>
@@ -343,7 +361,7 @@ export class UserClientService implements OnModuleInit {
     for (const [index, source] of sources.entries()) {
       if (source.status === 'rejected') {
         this.logger.warn(
-          `Story source #${index + 1} failed for @${normalizedUsername}: ${this.getTelegramErrorMessage(
+          `Story source ${storySources[index].label} failed for @${normalizedUsername}: ${this.getTelegramErrorMessage(
             source.reason,
           )}`,
         );
@@ -352,8 +370,8 @@ export class UserClientService implements OnModuleInit {
 
     if (storyItems.length === 0) {
       const firstRejectedSource = sources.find(
-        (source): source is PromiseRejectedResult =>
-          source.status === 'rejected',
+        (source, index): source is PromiseRejectedResult =>
+          source.status === 'rejected' && !storySources[index].optional,
       );
 
       if (firstRejectedSource) {
@@ -692,6 +710,14 @@ export class UserClientService implements OnModuleInit {
           limit,
         }),
       ),
+    );
+  }
+
+  private canFetchStoriesArchive(peer: Api.TypeInputPeer): boolean {
+    return (
+      peer instanceof Api.InputPeerSelf ||
+      peer instanceof Api.InputPeerChannel ||
+      peer instanceof Api.InputPeerChannelFromMessage
     );
   }
 

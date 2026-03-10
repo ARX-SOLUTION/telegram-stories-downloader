@@ -253,7 +253,7 @@ export class BotUpdate {
       '<code>durov</code>',
       '<code>@durov</code>',
       '<code>https://t.me/durov</code>',
-      'Bot active + archived storylarni olishga urinadi.',
+      'Bot username uchun ko‘rinadigan storylarni yuklaydi.',
       '',
       '<b>Session</b>',
       'End-user login qilmaydi.',
@@ -410,7 +410,7 @@ export class BotUpdate {
       ctx,
       `⏳ <b>Barcha storylar yuklanmoqda...</b>\n\nManba: <code>@${this.escapeHtml(
         normalizedUsername,
-      )}</code>\nTuri: <code>active + archived</code>`,
+      )}</code>\nTuri: <code>ko‘rinadigan storylar</code>`,
     );
 
     void this.processStoriesRequest(chatId, normalizedUsername);
