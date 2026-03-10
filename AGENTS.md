@@ -1,327 +1,488 @@
 # AGENTS.md
 
-This file defines working instructions for agents operating anywhere inside this repository.
+This file defines working instructions for every agent operating inside this repository.
+Read this file fully before making any changes.
+
+---
 
 ## Project Overview
 
-- Project type: NestJS Telegram bot + Telegram user client
-- Runtime: Node.js + TypeScript
-- Bot layer: `nestjs-telegraf` / `telegraf`
-- User client layer: `gramjs` via `telegram`
-- API base path: `/api`
-- Main user-client API base path: `/api/user-client`
+- **Project type:** NestJS Telegram Bot + Telegram MTProto User Client
+- **Runtime:** Node.js + TypeScript
+- **Bot layer:** `nestjs-telegraf` / `telegraf`
+- **User client layer:** `gramjs` via `telegram`
+- **API base path:** `/api`
+- **User-client API base path:** `/api/user-client`
 
 This project combines:
 
 1. A Telegram Bot API bot for user-facing chat commands
-2. A Telegram MTProto user client for dialogs, messaging, and account actions
-3. A REST API used to inspect and control the user client
-4. A story downloader flow for fetching Telegram stories by username
-5. A referral-gated pagination flow for unlocking additional story pages
+2. A Telegram MTProto user client for dialogs, stories, and account actions
+3. A REST API to inspect and control the user client externally
+
+---
 
 ## Important Files
 
-- App bootstrap: `src/main.ts`
-- Root module: `src/app.module.ts`
-- Bot handlers: `src/bot/bot.update.ts`
-- Bot module: `src/bot/bot.module.ts`
-- User-client service: `src/user-client/user-client.service.ts`
-- User-client controller: `src/user-client/user-client.controller.ts`
-- User-client DTOs: `src/user-client/user-client.dto.ts`
-- Shared user-client routes: `src/user-client/user-client.constants.ts`
-- Shared user-client types: `src/user-client/user-client.types.ts`
-- Config mapping: `src/config/configuration.ts`
-- Environment example: `.env.example`
+| File                                        | Purpose                                |
+| ------------------------------------------- | -------------------------------------- |
+| `src/main.ts`                               | App bootstrap                          |
+| `src/app.module.ts`                         | Root NestJS module                     |
+| `src/bot/bot.update.ts`                     | Bot command and event handlers         |
+| `src/bot/bot.module.ts`                     | Bot NestJS module                      |
+| `src/bot/bot-messages.ts`                   | All user-facing message strings        |
+| `src/bot/bot-keyboards.ts`                  | All inline keyboard definitions        |
+| `src/user-client/user-client.service.ts`    | MTProto client lifecycle + story logic |
+| `src/user-client/user-client.controller.ts` | REST endpoints for user client         |
+| `src/user-client/user-client.dto.ts`        | Request/response DTOs                  |
+| `src/user-client/user-client.constants.ts`  | Shared route constants                 |
+| `src/user-client/user-client.types.ts`      | Shared TypeScript types                |
+| `src/referral/referral.service.ts`          | Referral tracking and access gate      |
+| `src/config/configuration.ts`               | Environment config mapping             |
+| `.env.example`                              | Environment variable template          |
+| `.github/pull_request_template.md`          | PR template                            |
 
-## Environment
+---
 
-Expected environment variables:
+## Environment Variables
 
-- `PORT`
-- `TELEGRAM_API_ID`
-- `TELEGRAM_API_HASH`
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_LOG_LEVEL` (optional)
-- `TELEGRAM_SESSION_STRING` (optional but preferred)
-- `SESSION_FILE`
+| Variable                  | Description                                                          |
+| ------------------------- | -------------------------------------------------------------------- |
+| `PORT`                    | HTTP server port                                                     |
+| `TELEGRAM_API_ID`         | MTProto App ID from my.telegram.org                                  |
+| `TELEGRAM_API_HASH`       | MTProto App Hash from my.telegram.org                                |
+| `TELEGRAM_BOT_TOKEN`      | Bot token from @BotFather                                            |
+| `TELEGRAM_SESSION_STRING` | Optional pre-authorized MTProto session string                       |
+| `TELEGRAM_LOG_LEVEL`      | Optional GramJS log level (`none`, `error`, `warn`, `info`, `debug`) |
+| `SESSION_FILE`            | Relative path to MTProto session file                                |
 
 Notes:
 
-- Prefer `TELEGRAM_SESSION_STRING` when the bot should work without asking end-users to login.
-- Prefer `TELEGRAM_LOG_LEVEL=warn` or `error` in production to avoid noisy GramJS download logs.
-- `SESSION_FILE` is a relative path from the project root unless explicitly changed.
-- The MTProto session is persisted to disk. Avoid breaking this flow when refactoring login logic.
+- `SESSION_FILE` is relative to the project root unless explicitly changed
+- The MTProto session is persisted to disk — never break this flow when refactoring login logic
+- Prefer `TELEGRAM_SESSION_STRING` when the bot should run without asking end-users to login
+- Prefer `TELEGRAM_LOG_LEVEL=warn` or `error` in production to reduce noisy GramJS logs
+- Never hardcode secrets or real tokens into tracked files
+
+---
 
 ## Commands
 
 Use `npm` unless the user explicitly asks for another package manager.
 
-- Install: `npm install`
-- Dev server: `npm run start:dev`
-- Build: `npm run build`
-- Lint: `npm run lint`
-- Test: `npm run test`
+| Command             | Purpose                     |
+| ------------------- | --------------------------- |
+| `npm install`       | Install dependencies        |
+| `npm run start:dev` | Start dev server with watch |
+| `npm run build`     | Compile TypeScript          |
+| `npm run lint`      | Run ESLint across project   |
+| `npm run test`      | Run test suite              |
 
 When validating changes, prefer:
 
 1. `npm run build`
-2. Targeted `npx eslint <changed-files>`
+2. `npx eslint src/<changed-file>.ts`
 3. Broader lint/test only when useful
 
-## Architecture Notes
+---
+
+## Architecture
+
+### Layer Responsibilities
+
+```
+┌─────────────────────────────────────────────────────┐
+│                   Telegram Chat                     │
+│         (commands, text messages, callbacks)        │
+└──────────────────────┬──────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────┐
+│              bot.update.ts (Bot Layer)               │
+│  - Parse input                                      │
+│  - Check state                                      │
+│  - Call services                                    │
+│  - Format replies using BotMessages + BotKeyboards  │
+└──────────┬───────────────────────┬──────────────────┘
+           │                       │
+┌──────────▼──────────┐ ┌─────────▼──────────────────┐
+│  UserClientService  │ │      ReferralService        │
+│  - MTProto client   │ │  - Track referral counts    │
+│  - Login state      │ │  - Access gate logic        │
+│  - Story fetch      │ │  - Generate referral links  │
+│  - Session persist  │ └────────────────────────────┘
+└──────────┬──────────┘
+           │
+┌──────────▼──────────┐
+│ UserClientController│
+│  - REST endpoints   │
+│  - Thin methods     │
+└─────────────────────┘
+```
 
 ### Bot Layer
 
-- Telegram chat commands are handled in `src/bot/bot.update.ts`
-- Keep bot replies concise and user-friendly
-- Bot messages currently follow an Uzbek-first UX; preserve that unless the user asks otherwise
-- When returning formatted Telegram text, use HTML formatting compatible with Telegraf
-- `/stories <username>` and `/referral` are implemented in the bot layer and should stay user-friendly and step-based
+- All Telegram commands and events are handled in `src/bot/bot.update.ts`
+- `bot.update.ts` must stay thin — only parse input, call services, send replies
+- All reply strings come from `BotMessages.*` — never hardcode strings in handlers
+- All keyboards come from `BotKeyboards.*` — never hardcode inline keyboards in handlers
+- Every `ctx.reply()` and `ctx.editMessageText()` must use `{ parse_mode: 'HTML' }`
+- Escape all dynamic content (usernames, phone numbers, links) with `escapeHtml()` before rendering
 
 ### User Client Layer
 
-- `UserClientService` owns MTProto client lifecycle, login state, session persistence, and dialogs/messages
-- `UserClientService` also owns Telegram story fetching/downloading via GramJS
-- Login state is centralized and should remain the single source of truth
-- If you add login-related behavior, update both:
-  - status/reporting responses
-  - bot flow prompts and next actions
-- If you add story-related behavior, keep fetching, normalization, error mapping, and media preparation in the service
+- `UserClientService` owns MTProto client lifecycle, login state, session persistence, and story fetching
+- Login state is centralized — single source of truth
+- If you add login-related behavior, update both status reporting and bot flow prompts
+- Story fetch always returns newest-first (sorted by `date` descending) before pagination
+
+### Referral Layer
+
+- `ReferralService` is a standalone injectable service
+- It currently uses an in-memory `Map<number, Set<number>>` model — keep the DB replacement note explicit
+- Free limit: first 5 stories (page 0) always free
+- Page 1+ requires `referralCount >= 5`
+- Self-referral is silently ignored
+- The same referred user must never count twice
 
 ### REST Layer
 
 - `UserClientController` exposes REST endpoints for user-client actions
-- Keep controller methods thin; business logic belongs in the service
-- Reuse shared route constants/types when possible instead of duplicating strings
+- Keep controller methods thin — business logic belongs in the service
+- Reuse shared route constants from `user-client.constants.ts`
+- Never move login logic into the controller
+
+### Message & Keyboard Layer
+
+- `BotMessages` contains pure functions returning HTML strings
+- `BotKeyboards` contains pure functions returning Telegraf keyboard configs
+- Every message should answer:
+  1. What happened?
+  2. What is the current state?
+  3. What should the user do next?
+- Uzbek-first UX is the default unless the user explicitly requests otherwise
+
+---
+
+## Login Flow
+
+### Supported States
+
+| State              | Meaning                     |
+| ------------------ | --------------------------- |
+| `idle`             | Not started                 |
+| `waiting_phone`    | Awaiting phone number input |
+| `waiting_code`     | Awaiting SMS/Telegram code  |
+| `waiting_password` | Awaiting 2FA password       |
+| `authorized`       | Logged in successfully      |
+| `error`            | Login failed                |
+
+### Rules
+
+- Do not scatter login state transitions across multiple files
+- Preserve these behaviors when editing login flow:
+  - Session restore on startup
+  - Session persist on success
+  - Login error capture with reason
+  - Clear next-action guidance in every state
+  - Safe handling of phone/code/password submission
+
+---
+
+## Story Download Flow
+
+### Order
+
+- Always fetch: active → pinned → archived (if peer type supports archive fetching)
+- Always deduplicate by story ID before downloading
+- Always sort newest-first before slicing pages
+
+### Pagination
+
+- Page size: `5` stories per page (`STORIES_PER_PAGE = 5`)
+- Page 0: always free, no referral check
+- Page 1+: referral gate applied
+- Archive fetch uses offset pagination — loop until `items.length < limit`
+
+### Sending
+
+- Video `<= 50MB` → send as video
+- Video `> 50MB` → send as document
+- Photo → send as photo
+- Add `sleep(400ms)` between story sends to reduce Telegram rate-limit pressure
+
+---
+
+## Referral System
+
+### Flow
+
+```
+User A shares link → https://t.me/BotUsername?start=ref_<userIdA>
+User B clicks link → bot receives /start ref_<userIdA>
+Bot calls ReferralService.registerReferral(userIdA, userIdB)
+User A's count increases by 1
+When count reaches 5 → User A gains full story access
+```
+
+### Referral Gate UI Must Include
+
+- Visual progress bar using emoji (`🟩` filled, `⬜️` empty)
+- Current count and percentage
+- Share button using `t.me/share/url`
+- Refresh button that updates the message in place via `ctx.editMessageText()`
+- Copy button that sends the referral link back as a `<code>` block
+
+---
+
+## Bot Commands
+
+| Command              | Description                                    |
+| -------------------- | ---------------------------------------------- |
+| `/start`             | Welcome message and referral payload detection |
+| `/stories @username` | Download stories                               |
+| `/referral`          | Show referral status and share link            |
+| `/status`            | Show current login state and next action       |
+| `/login`             | Start login flow step by step                  |
+| `/cancel`            | Cancel current login flow                      |
+| `/help`              | Full help with commands and usage              |
+
+### Smart Text Handler
+
+- Any plain text message matching a Telegram username should trigger story download
+- Messages starting with `/` are skipped and handled as commands
+- Short words under 5 characters are silently ignored
+- `https://t.me/<username>` links are also accepted by the current bot handler
+
+---
+
+## Inline Mode
+
+- `BotMessages` contains inline-related copy, but `bot.update.ts` does **not** currently implement inline query handlers
+- Do not assume inline mode is active or documented as available until `@InlineQuery()` / related handlers are actually wired
+- If inline mode is added later, update this file, bot help text, and bot settings-related docs together
+
+---
 
 ## Coding Rules
 
-- Match the existing NestJS style and keep changes minimal
-- Prefer small helper methods over repeating message/state logic
-- Keep shared strings and route paths centralized when reused
+- Match existing NestJS style — keep changes minimal and focused
+- Prefer small helper methods over repeated logic
+- Keep shared strings in `BotMessages`, shared keyboards in `BotKeyboards`
+- Keep shared route paths in `user-client.constants.ts`
 - Avoid adding unnecessary dependencies
 - Do not introduce inline comments unless they add real value
 - Do not use one-letter variable names
-- Prefer strict, explicit types for public service responses
-- Avoid `any` when an obvious local type can be used
+- Prefer strict, explicit types for all public service methods
+- Avoid `any` — define a local type when needed
+- Keep controller methods thin — delegate to services immediately
 
-## Bot UX Rules
+---
 
-- `/start` should explain the main commands clearly
-- `/help` should describe both chat flow and REST alternatives when relevant
-- `/status` should show current login state and what to do next
-- Avoid making end-users depend on `/login` when a preconfigured session can be used
-- `/stories <username>` should explain usage clearly when the argument is missing
-- If login is waiting for input, plain text sent in chat may be interpreted as the next login step
-- Keep Telegram replies safe for HTML output; escape dynamic content before rendering
-- Story-related replies should stay Uzbek-first and include clear progress, empty-state, and error messages
+## TypeScript Types Reference
 
-## Story Download Rules
+```ts
+type LoginState =
+  | 'idle'
+  | 'waiting_phone'
+  | 'waiting_code'
+  | 'waiting_password'
+  | 'authorized'
+  | 'error';
 
-- Use GramJS / MTProto only for story access; do not use scraping or third-party story APIs
-- Resolve the peer from username inside `UserClientService`
-- Normalize usernames safely:
-  - allow `username`
-  - allow `@username`
-  - allow `https://t.me/username` when useful
-- Validate authorization before trying to fetch stories
-- Fetch stories through Telegram story APIs, not ad-hoc workarounds
-- Download story media through the Telegram client and return typed media objects
-- Return newest stories first
-- Default to paginated story delivery (5 per page) in the bot UX
-- Keep page 0 free and gate page 1+ behind the referral rules
-- Support at least:
-  - photo stories
-  - video stories
-- Unsupported story media should fail gracefully or be skipped with safe logging
-- User-facing errors should distinguish between:
-  - not authorized
-  - username not found
-  - private / access denied
-  - rate limit / flood wait
-  - no stories found
-- Referral-gated pages should explain how many more invites are needed and show the user referral link
-- If temporary files are ever created during story download, they must be cleaned up
+type StoryMediaItem = {
+  id: number;
+  date: number;
+  isPinned: boolean;
+  isExpired: boolean;
+  media: Api.TypeMessageMedia;
+  storyItem: Api.StoryItem;
+};
 
-## Login Flow Rules
+type StoryDownloadResult = {
+  storyId: number;
+  date: number;
+  buffer: Buffer;
+  mimeType: string;
+  filename: string;
+};
 
-- Supported login states:
-  - `idle`
-  - `waiting_phone`
-  - `waiting_code`
-  - `waiting_password`
-  - `authorized`
-  - `error`
-- Do not scatter login-state transitions across multiple files without good reason
-- Preserve these behaviors when editing login flow:
-  - session restore on startup
-  - session persist on success
-  - login error capture
-  - clear next-action guidance
-  - safe handling of phone/code/password submission
+type PaginatedStoriesResult = {
+  stories: StoryDownloadResult[];
+  page: number;
+  total: number;
+  hasMore: boolean;
+  pagesCount: number;
+};
 
-## Validation Expectations
+type StoryFetchStatus = {
+  username: string;
+  total: number;
+  downloaded: number;
+  failed: number;
+};
+```
 
-For code changes, run the narrowest useful validation first.
+---
 
-Typical validation sequence:
+## Git Workflow
 
-1. `npm run build`
-2. `npx eslint src/...changed-file.ts`
+Every code change — no matter how small — must follow this workflow.
 
-If tests are added or affected, run the smallest relevant test command.
-
-## Things To Avoid
-
-- Do not rename API routes casually
-- Do not break the `/api` global prefix assumption
-- Do not move login logic into the controller
-- Do not move story-fetching business logic into the bot handler
-- Do not hardcode secrets or real tokens into tracked files
-- Do not rewrite unrelated files just for formatting
-- Do not commit directly to `main`
-- Do not open PRs without passing `npm run build`
-- Do not combine unrelated changes in one PR
-- Do not merge your own PR without review if working in a team
-
-## When Updating Documentation
-
-Update docs when behavior changes in any of these areas:
-
-- bot commands
-- login flow
-- story download flow
-- environment variables
-- REST endpoints
-
-If no full documentation update is needed, at least keep this file accurate.
-
-## Git Workflow Rules
-
-Every code change must follow this workflow.
-
-### Branch Naming Convention
+### Branch Naming
 
 Format: `<type>/<short-description>`
 
-Types:
-
-- `feat/` — new feature
-- `fix/` — bug fix
-- `refactor/` — code restructure, no behavior change
-- `chore/` — config, deps, tooling
-- `docs/` — documentation only
+| Prefix      | When to use                     |
+| ----------- | ------------------------------- |
+| `feat/`     | New feature                     |
+| `fix/`      | Bug fix                         |
+| `refactor/` | Restructure, no behavior change |
+| `chore/`    | Config, deps, tooling           |
+| `docs/`     | Documentation only              |
 
 Examples:
 
 - `feat/story-pagination`
 - `feat/referral-gate`
-- `fix/inline-query-handler`
+- `fix/inline-query-empty-input`
+- `refactor/bot-messages-centralize`
 - `docs/update-agents-md`
 
-### Required Workflow
+### Required Steps
 
-1. Pull latest `main`
-   - `git checkout main`
-   - `git pull origin main`
-2. Create a new branch
-   - `git checkout -b feat/your-feature-name`
-3. Make code changes
-4. Validate before committing
-   - `npm run build`
-   - `npx eslint src/<changed-file>.ts`
-5. Stage and commit
-   - `git add .`
-   - `git commit -m "<type>(<scope>): <short description>"`
-6. Push branch
-   - `git push origin feat/your-feature-name`
-7. Open Pull Request
-   - Title: same as commit message
-   - Body: use `.github/pull_request_template.md`
-   - Base branch: `main`
+```bash
+# 1. Pull latest main
+git checkout main
+git pull origin main
+
+# 2. Create branch
+git checkout -b feat/your-feature-name
+
+# 3. Make changes
+
+# 4. Validate
+npm run build
+npx eslint src/<changed-file>.ts
+
+# 5. Commit
+git add .
+git commit -m "<type>(<scope>): <short description>"
+
+# 6. Push
+git push origin feat/your-feature-name
+
+# 7. Open Pull Request on GitHub
+```
 
 ### Commit Message Format
 
 Follow Conventional Commits:
 
-- `feat(stories): add pagination with 5 stories per page`
-- `feat(referral): gate story page 2+ behind referral count`
-- `fix(inline): handle empty username query gracefully`
-- `refactor(user-client): extract story fetch into helper methods`
-- `docs(agents): add git workflow rules`
-- `chore(bot): update BotFather commands list`
-
-### Pull Request Template
-
-Use `.github/pull_request_template.md` for every PR.
-
-### Feature Branch Examples
-
-#### Branch 1 — Core story downloader
-
-```bash
-git checkout main && git pull origin main
-git checkout -b feat/story-downloader
-git add .
-git commit -m "feat(stories): add getAllUserStories with active, pinned and archived fetch"
-git push origin feat/story-downloader
+```text
+<type>(<scope>): <short description>
 ```
 
-#### Branch 2 — Newest first + pagination
+Examples:
 
-```bash
-git checkout main && git pull origin main
-git checkout -b feat/story-pagination
-git add .
-git commit -m "feat(stories): sort newest-first and add 5-per-page pagination"
-git push origin feat/story-pagination
+```text
+feat(stories): add pagination with 5 stories per page
+feat(referral): gate story page 2+ behind referral count
+feat(inline): add inline query support for story download
+fix(inline): handle empty username query gracefully
+refactor(bot): centralize all messages into bot-messages.ts
+chore(bot): update BotFather commands list in help
+docs(agents): add git workflow and coding rules
 ```
 
-#### Branch 3 — Referral gate
+### Pull Request Rules
 
-```bash
-git checkout main && git pull origin main
-git checkout -b feat/referral-gate
-git add .
-git commit -m "feat(referral): gate story page 2+ behind 5 referral invite requirement"
-git push origin feat/referral-gate
-```
-
-#### Branch 4 — Inline mode
-
-```bash
-git checkout main && git pull origin main
-git checkout -b feat/inline-mode
-git add .
-git commit -m "feat(inline): add inline query support for story download and count"
-git push origin feat/inline-mode
-```
-
-#### Branch 5 — Bot settings + help update
-
-```bash
-git checkout main && git pull origin main
-git checkout -b chore/bot-settings
-git add .
-git commit -m "chore(bot): update help command to match BotFather configuration"
-git push origin chore/bot-settings
-```
-
-#### Branch 6 — AGENTS.md git workflow
-
-```bash
-git checkout main && git pull origin main
-git checkout -b docs/agents-git-workflow
-git add .
-git commit -m "docs(agents): add git workflow rules, branch naming and PR template"
-git push origin docs/agents-git-workflow
-```
-
-### Rules
-
-- Never commit directly to `main`
-- Never force push to `main`
-- Every PR must have `npm run build` passing before merge
+- Title must match commit message format
+- Body must use `.github/pull_request_template.md`
+- `npm run build` must pass before opening PR
 - One feature = one branch = one PR
 - Keep PRs small and focused
 - Delete branch after merge
+- Never force push to `main`
+- Never commit directly to `main`
+- Never merge your own PR without review when working in a team
+
+---
+
+## PR Template (`.github/pull_request_template.md`)
+
+```markdown
+## Summary
+
+<!-- What does this PR do? 1-2 sentences -->
+
+## Changes
+
+<!-- List each changed file and why -->
+
+- `src/` —
+
+## Type
+
+- [ ] feat — new feature
+- [ ] fix — bug fix
+- [ ] refactor — no behavior change
+- [ ] docs — documentation
+- [ ] chore — config/tooling
+
+## Validation
+
+- [ ] `npm run build` passed
+- [ ] `npx eslint <changed-files>` passed
+- [ ] Tested manually in Telegram
+
+## Related
+
+Closes #
+```
+
+---
+
+## Validation Sequence
+
+For every change, run in this order:
+
+1. `npm run build` — always required
+2. `npx eslint src/...changed-file.ts` — targeted lint
+3. `npm run test` — only when tests are added or affected
+
+Never skip step 1 before committing.
+
+---
+
+## Things To Avoid
+
+- Do not commit directly to `main`
+- Do not open PRs without passing `npm run build`
+- Do not combine unrelated changes in one PR
+- Do not rename API routes casually
+- Do not break the `/api` global prefix assumption
+- Do not move login logic into the controller
+- Do not hardcode secrets or real tokens into tracked files
+- Do not rewrite unrelated files just for formatting
+- Do not use `any` when an obvious local type can be used
+- Do not hardcode reply strings — always use `BotMessages.*`
+- Do not hardcode keyboards — always use `BotKeyboards.*`
+- Do not send Telegram replies without `parse_mode: 'HTML'`
+- Do not render dynamic content without `escapeHtml()`
+- Do not merge your own PR without review in a team setting
+
+---
+
+## When to Update This File
+
+Update `AGENTS.md` when behavior changes in any of these areas:
+
+- Bot commands (add, remove, rename)
+- Login flow states or transitions
+- Environment variables (add, remove, rename)
+- REST endpoints (add, remove, rename)
+- Architecture layers or responsibilities
+- Git workflow rules
+- Coding rules or type definitions
+
+If no full update is needed, at minimum keep the **Important Files** table accurate.
