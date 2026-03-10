@@ -1,24 +1,32 @@
-import
-    {
-        BadRequestException,
-        Injectable,
-        Logger,
-        OnModuleInit,
-    } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  HttpException,
+  HttpStatus,
+  Injectable,
+  Logger,
+  NotFoundException,
+  OnModuleInit,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as fs from 'fs';
 import * as path from 'path';
 import { Api, TelegramClient } from 'telegram';
 import { NewMessage, NewMessageEvent } from 'telegram/events';
 import { StringSession } from 'telegram/sessions';
+import { USER_CLIENT_API_ROUTES } from './user-client.constants';
+import {
+  DownloadedStoryMedia,
+  LoginFlowResponse,
+  LoginState,
+  UserClientStatus,
+} from './user-client.types';
 
-type LoginState =
-  | 'idle'
-  | 'waiting_phone'
-  | 'waiting_code'
-  | 'waiting_password'
-  | 'authorized'
-  | 'error';
+interface LoginStateWaiter {
+  states: Set<LoginState>;
+  resolve: (state: LoginState | null) => void;
+  timer: NodeJS.Timeout;
+}
 
 @Injectable()
 export class UserClientService implements OnModuleInit {
@@ -27,11 +35,13 @@ export class UserClientService implements OnModuleInit {
   private client!: TelegramClient;
   private loginState: LoginState = 'idle';
   private sessionFilePath: string;
+  private lastLoginError: string | null = null;
+  private eventHandlersRegistered = false;
+  private readonly loginStateWaiters = new Set<LoginStateWaiter>();
 
-  // Promise resolvers for the interactive login flow
-  private phoneResolver: ((v: string) => void) | null = null;
-  private codeResolver: ((v: string) => void) | null = null;
-  private passwordResolver: ((v: string) => void) | null = null;
+  private phoneResolver: ((value: string) => void) | null = null;
+  private codeResolver: ((value: string) => void) | null = null;
+  private passwordResolver: ((value: string) => void) | null = null;
 
   constructor(private readonly config: ConfigService) {
     this.sessionFilePath = path.join(
@@ -39,8 +49,6 @@ export class UserClientService implements OnModuleInit {
       this.config.get<string>('telegram.sessionFile') ?? 'session.txt',
     );
   }
-
-  // ─── Lifecycle ────────────────────────────────────────────────────────────
 
   async onModuleInit() {
     const apiId = this.config.get<number>('telegram.apiId')!;
@@ -57,17 +65,17 @@ export class UserClientService implements OnModuleInit {
     await this.client.connect();
 
     if (await this.client.isUserAuthorized()) {
-      this.loginState = 'authorized';
+      this.setLoginState('authorized');
+      this.lastLoginError = null;
       this.logger.log('✅ User client authorized from saved session');
       this.setupEventHandlers();
-    } else {
-      this.logger.warn(
-        '⚠️  User client not authorized. Use POST /user-client/login/initiate',
-      );
+      return;
     }
-  }
 
-  // ─── Session helpers ──────────────────────────────────────────────────────
+    this.logger.warn(
+      `⚠️ User client not authorized. Start via ${USER_CLIENT_API_ROUTES.initiateLogin} or /login`,
+    );
+  }
 
   private loadSession(): string {
     try {
@@ -77,6 +85,7 @@ export class UserClientService implements OnModuleInit {
     } catch {
       this.logger.warn('Could not load session file');
     }
+
     return '';
   }
 
@@ -86,137 +95,164 @@ export class UserClientService implements OnModuleInit {
     this.logger.log(`💾 Session saved to ${this.sessionFilePath}`);
   }
 
-  // ─── Login flow ───────────────────────────────────────────────────────────
-
-  /**
-   * Step 1 — call once to begin the login flow.
-   * Internally starts client.start() which drives the entire MTProto auth.
-   */
-  async initiateLogin(): Promise<{ state: LoginState; message: string }> {
+  initiateLogin(): LoginFlowResponse {
     if (this.loginState === 'authorized') {
-      return { state: 'authorized', message: 'Already authorized' };
-    }
-    if (
-      this.loginState === 'waiting_phone' ||
-      this.loginState === 'waiting_code' ||
-      this.loginState === 'waiting_password'
-    ) {
-      return {
-        state: this.loginState,
-        message: `Login already in progress. Current step: ${this.loginState}`,
-      };
+      return this.createLoginFlowResponse(
+        'authorized',
+        'User client is already authorized.',
+      );
     }
 
-    this.loginState = 'waiting_phone';
+    if (this.isWaitingForLoginInput()) {
+      return this.createLoginFlowResponse(
+        this.loginState,
+        `Login already in progress. Current step: ${this.loginState}.`,
+      );
+    }
 
-    // Fire-and-forget — resolvers drive each step via HTTP calls below
-    this.client
+    this.lastLoginError = null;
+    this.clearLoginResolvers();
+    this.setLoginState('waiting_phone');
+
+    void this.client
       .start({
         phoneNumber: () =>
           new Promise<string>((resolve) => {
             this.phoneResolver = resolve;
           }),
-
         phoneCode: () => {
-          this.loginState = 'waiting_code';
-          this.logger.log('📱 Code requested — call POST /login/submit-code');
+          this.setLoginState('waiting_code');
+          this.logger.log(
+            `📱 Code requested — submit via ${USER_CLIENT_API_ROUTES.submitCode} or bot chat`,
+          );
+
           return new Promise<string>((resolve) => {
             this.codeResolver = resolve;
           });
         },
-
         password: () => {
-          this.loginState = 'waiting_password';
+          this.setLoginState('waiting_password');
           this.logger.log(
-            '🔐 2FA password requested — call POST /login/submit-password',
+            `🔐 2FA password requested — submit via ${USER_CLIENT_API_ROUTES.submitPassword} or bot chat`,
           );
+
           return new Promise<string>((resolve) => {
             this.passwordResolver = resolve;
           });
         },
-
-        onError: (err) => {
-          this.logger.error('Login error:', err);
-          this.loginState = 'error';
-        },
+        onError: (error) => Promise.resolve(this.handleLoginFailure(error)),
       })
       .then(() => {
-        this.loginState = 'authorized';
-        this.persistSession();
-        this.setupEventHandlers();
-        this.logger.log('🎉 Login successful!');
+        this.handleLoginSuccess();
       })
-      .catch((err: Error) => {
-        this.logger.error('Login failed:', err.message);
-        this.loginState = 'error';
+      .catch((error: Error) => {
+        if (error.message === 'AUTH_USER_CANCEL') {
+          return;
+        }
+
+        this.handleLoginFailure(error);
       });
 
-    return {
-      state: this.loginState,
-      message: 'Login initiated. Submit phone via POST /user-client/login/submit-phone',
-    };
+    return this.createLoginFlowResponse(
+      'waiting_phone',
+      'Login started. Share the phone number to continue.',
+    );
   }
 
-  /** Step 2 — submit phone number (e.g. +998901234567) */
-  async submitPhone(phoneNumber: string): Promise<{ state: LoginState; message: string }> {
+  async submitPhone(phoneNumber: string): Promise<LoginFlowResponse> {
     if (this.loginState !== 'waiting_phone' || !this.phoneResolver) {
       throw new BadRequestException(
-        `Cannot submit phone in state "${this.loginState}". Call /login/initiate first.`,
+        `Cannot submit phone in state "${this.loginState}". Start again via /login or ${USER_CLIENT_API_ROUTES.initiateLogin}.`,
       );
     }
-    this.phoneResolver(phoneNumber);
+
+    const normalizedPhoneNumber = this.normalizePhoneNumber(phoneNumber);
+
+    this.phoneResolver(normalizedPhoneNumber);
     this.phoneResolver = null;
-    return {
-      state: this.loginState,
-      message: 'Phone submitted. Telegram will send a code. Poll GET /user-client/status to see when state becomes "waiting_code".',
-    };
+    this.setLoginState('waiting_code');
+
+    const nextState = await this.waitForAnyLoginState([
+      'waiting_code',
+      'waiting_password',
+      'authorized',
+      'error',
+    ]);
+
+    return this.createLoginFlowResponse(
+      nextState ?? this.loginState,
+      this.getPhoneSubmissionMessage(nextState ?? this.loginState),
+    );
   }
 
-  /** Step 3 — submit the OTP code received in Telegram */
-  async submitCode(code: string): Promise<{ state: LoginState; message: string }> {
+  async submitCode(code: string): Promise<LoginFlowResponse> {
     if (this.loginState !== 'waiting_code' || !this.codeResolver) {
       throw new BadRequestException(
-        `Cannot submit code in state "${this.loginState}". Submit phone first.`,
+        `Cannot submit code in state "${this.loginState}". Submit the phone number first.`,
       );
     }
-    this.codeResolver(code);
+
+    const normalizedCode = this.normalizeCode(code);
+
+    this.codeResolver(normalizedCode);
     this.codeResolver = null;
-    return {
-      state: this.loginState,
-      message: 'Code submitted. Poll GET /user-client/status — state will become "authorized" or "waiting_password" if 2FA is enabled.',
-    };
+
+    const nextState = await this.waitForAnyLoginState([
+      'waiting_password',
+      'authorized',
+      'error',
+    ]);
+
+    return this.createLoginFlowResponse(
+      nextState ?? this.loginState,
+      this.getCodeSubmissionMessage(nextState ?? this.loginState),
+    );
   }
 
-  /** Step 4 (optional) — submit 2-step verification password */
-  async submitPassword(password: string): Promise<{ state: LoginState; message: string }> {
+  async submitPassword(password: string): Promise<LoginFlowResponse> {
     if (this.loginState !== 'waiting_password' || !this.passwordResolver) {
       throw new BadRequestException(
         `Cannot submit password in state "${this.loginState}". 2FA may not be required.`,
       );
     }
-    this.passwordResolver(password);
+
+    const normalizedPassword = password.trim();
+    if (!normalizedPassword) {
+      throw new BadRequestException('Password cannot be empty.');
+    }
+
+    this.passwordResolver(normalizedPassword);
     this.passwordResolver = null;
-    return {
-      state: this.loginState,
-      message: 'Password submitted. Poll GET /user-client/status for "authorized".',
-    };
+
+    const nextState = await this.waitForAnyLoginState(['authorized', 'error']);
+
+    return this.createLoginFlowResponse(
+      nextState ?? this.loginState,
+      this.getPasswordSubmissionMessage(nextState ?? this.loginState),
+    );
   }
 
-  // ─── Status ───────────────────────────────────────────────────────────────
-
-  async getStatus(): Promise<{
-    loginState: LoginState;
-    connected: boolean;
-    authorized: boolean;
-  }> {
+  getStatus(): UserClientStatus {
     return {
       loginState: this.loginState,
       connected: !!this.client?.connected,
       authorized: this.loginState === 'authorized',
+      nextAction: this.getNextAction(this.loginState),
+      lastError: this.lastLoginError,
     };
   }
 
-  // ─── User-bot actions ─────────────────────────────────────────────────────
+  getLoginState(): LoginState {
+    return this.loginState;
+  }
+
+  isWaitingForLoginInput(): boolean {
+    return (
+      this.loginState === 'waiting_phone' ||
+      this.loginState === 'waiting_code' ||
+      this.loginState === 'waiting_password'
+    );
+  }
 
   async sendMessage(to: string, text: string): Promise<void> {
     this.ensureAuthorized();
@@ -232,46 +268,445 @@ export class UserClientService implements OnModuleInit {
 
   async leaveChannel(channel: string): Promise<void> {
     this.ensureAuthorized();
-    await this.client.invoke(
-      new Api.channels.LeaveChannel({ channel }),
-    );
+    await this.client.invoke(new Api.channels.LeaveChannel({ channel }));
     this.logger.log(`🚪 Left channel: ${channel}`);
   }
 
-  async getDialogs(): Promise<{ id: string; name: string; username: string }[]> {
+  async getDialogs(): Promise<
+    { id: string; name: string; username: string }[]
+  > {
     this.ensureAuthorized();
     const dialogs = await this.client.getDialogs({ limit: 50 });
-    return dialogs.map((d) => ({
-      id: d.id?.toString() ?? '',
-      name: d.title ?? d.name ?? '',
-      username: (d.entity as any)?.username ?? '',
+
+    return dialogs.map((dialog) => ({
+      id: dialog.id?.toString() ?? '',
+      name: dialog.title ?? dialog.name ?? '',
+      username:
+        (dialog.entity as { username?: string } | undefined)?.username ?? '',
     }));
   }
 
-  // ─── Event handlers ───────────────────────────────────────────────────────
+  async getUserStories(username: string): Promise<DownloadedStoryMedia[]> {
+    this.ensureAuthorized();
+
+    const normalizedUsername = this.normalizeUsername(username);
+    const peer = await this.resolveStoryPeer(normalizedUsername);
+
+    let response: Api.stories.PeerStories;
+    try {
+      response = await this.client.invoke(
+        new Api.stories.GetPeerStories({ peer }),
+      );
+    } catch (error) {
+      throw this.mapStoryError(error, normalizedUsername);
+    }
+
+    const storyItems = response.stories.stories.filter(
+      (story): story is Api.StoryItem => story instanceof Api.StoryItem,
+    );
+
+    const stories: DownloadedStoryMedia[] = [];
+
+    for (const story of storyItems) {
+      const media = await this.downloadStoryMedia(normalizedUsername, story);
+      if (media) {
+        stories.push(media);
+      }
+    }
+
+    return stories;
+  }
 
   private setupEventHandlers() {
-    this.client.addEventHandler(async (event: NewMessageEvent) => {
-      try {
-        const message = event.message;
-        if (!message) return;
+    if (this.eventHandlersRegistered) {
+      return;
+    }
 
-        const chat = await message.getChat();
-        const username = (chat as any)?.username ?? 'private';
-        const sender = message.senderId?.toString() ?? 'unknown';
-
-        this.logger.log(
-          `📩 [@${username}] sender=${sender} | ${message.message}`,
-        );
-      } catch (err) {
-        this.logger.error('Event handler error:', err);
-      }
+    this.client.addEventHandler((event: NewMessageEvent) => {
+      void this.logIncomingMessage(event);
     }, new NewMessage({}));
 
+    this.eventHandlersRegistered = true;
     this.logger.log('🔔 Event handlers registered');
   }
 
-  // ─── Helpers ──────────────────────────────────────────────────────────────
+  private async logIncomingMessage(event: NewMessageEvent): Promise<void> {
+    try {
+      const message = event.message;
+      if (!message) {
+        return;
+      }
+
+      const chat = await message.getChat();
+      const username =
+        (chat as { username?: string } | undefined)?.username ?? 'private';
+      const sender = message.senderId?.toString() ?? 'unknown';
+
+      this.logger.log(
+        `📩 [@${username}] sender=${sender} | ${message.message}`,
+      );
+    } catch (error) {
+      this.logger.error('Event handler error:', error);
+    }
+  }
+
+  private handleLoginSuccess() {
+    this.lastLoginError = null;
+    this.clearLoginResolvers();
+    this.setLoginState('authorized');
+    this.persistSession();
+    this.setupEventHandlers();
+    this.logger.log('🎉 Login successful');
+  }
+
+  private handleLoginFailure(error: unknown): boolean {
+    const message =
+      error instanceof Error ? error.message : 'Unknown login error';
+    this.lastLoginError = message;
+    this.clearLoginResolvers();
+    this.setLoginState('error');
+    this.logger.error(`Login failed: ${message}`);
+    return true;
+  }
+
+  private createLoginFlowResponse(
+    state: LoginState,
+    message: string,
+  ): LoginFlowResponse {
+    return {
+      state,
+      message,
+      nextAction: this.getNextAction(state),
+      lastError: this.lastLoginError,
+    };
+  }
+
+  private getNextAction(state: LoginState): string | undefined {
+    switch (state) {
+      case 'idle':
+        return `Start login with /login or POST ${USER_CLIENT_API_ROUTES.initiateLogin}.`;
+      case 'waiting_phone':
+        return `Submit phone via bot chat or POST ${USER_CLIENT_API_ROUTES.submitPhone}.`;
+      case 'waiting_code':
+        return `Submit Telegram code via bot chat or POST ${USER_CLIENT_API_ROUTES.submitCode}.`;
+      case 'waiting_password':
+        return `Submit 2FA password via bot chat or POST ${USER_CLIENT_API_ROUTES.submitPassword}.`;
+      case 'authorized':
+        return `Open dialogs with /dialogs, download stories with /stories <username>, or GET ${USER_CLIENT_API_ROUTES.dialogs}.`;
+      case 'error':
+        return `Restart login with /login or POST ${USER_CLIENT_API_ROUTES.initiateLogin}.`;
+      default:
+        return undefined;
+    }
+  }
+
+  private getPhoneSubmissionMessage(state: LoginState): string {
+    switch (state) {
+      case 'waiting_code':
+        return 'Phone number accepted. Telegram yuborgan kodni kiriting.';
+      case 'waiting_password':
+        return 'Phone number accepted. 2FA parol so‘raldi.';
+      case 'authorized':
+        return 'Phone number accepted. Login successful.';
+      case 'error':
+        return 'Telefon raqami tasdiqlanmadi.';
+      default:
+        return 'Phone number submitted. Holat tekshirilmoqda.';
+    }
+  }
+
+  private getCodeSubmissionMessage(state: LoginState): string {
+    switch (state) {
+      case 'waiting_password':
+        return 'Code accepted. Endi 2FA parolni yuboring.';
+      case 'authorized':
+        return 'Code accepted. Login successful.';
+      case 'error':
+        return 'Kod tasdiqlanmadi.';
+      default:
+        return 'Code submitted. Holat tekshirilmoqda.';
+    }
+  }
+
+  private getPasswordSubmissionMessage(state: LoginState): string {
+    switch (state) {
+      case 'authorized':
+        return 'Password accepted. Login successful.';
+      case 'error':
+        return 'Parol tasdiqlanmadi.';
+      default:
+        return 'Password submitted. Holat tekshirilmoqda.';
+    }
+  }
+
+  private setLoginState(state: LoginState) {
+    this.loginState = state;
+    this.resolveStateWaiters(state);
+  }
+
+  private resolveStateWaiters(state: LoginState) {
+    for (const waiter of [...this.loginStateWaiters]) {
+      if (!waiter.states.has(state)) {
+        continue;
+      }
+
+      clearTimeout(waiter.timer);
+      this.loginStateWaiters.delete(waiter);
+      waiter.resolve(state);
+    }
+  }
+
+  private waitForAnyLoginState(
+    states: LoginState[],
+    timeoutMs = 8000,
+  ): Promise<LoginState | null> {
+    if (states.includes(this.loginState)) {
+      return Promise.resolve(this.loginState);
+    }
+
+    return new Promise((resolve) => {
+      const waiter: LoginStateWaiter = {
+        states: new Set(states),
+        resolve,
+        timer: setTimeout(() => {
+          this.loginStateWaiters.delete(waiter);
+          resolve(null);
+        }, timeoutMs),
+      };
+
+      this.loginStateWaiters.add(waiter);
+    });
+  }
+
+  private clearLoginResolvers() {
+    this.phoneResolver = null;
+    this.codeResolver = null;
+    this.passwordResolver = null;
+  }
+
+  private normalizePhoneNumber(phoneNumber: string): string {
+    const sanitizedPhoneNumber = phoneNumber.replace(/[^\d+]/g, '');
+
+    if (!sanitizedPhoneNumber) {
+      throw new BadRequestException(
+        'Phone number is required. Use international format like +998901234567.',
+      );
+    }
+
+    if (sanitizedPhoneNumber.startsWith('+')) {
+      return sanitizedPhoneNumber;
+    }
+
+    if (/^\d{7,15}$/.test(sanitizedPhoneNumber)) {
+      return `+${sanitizedPhoneNumber}`;
+    }
+
+    throw new BadRequestException(
+      'Invalid phone number. Use international format like +998901234567.',
+    );
+  }
+
+  private normalizeCode(code: string): string {
+    const sanitizedCode = code.replace(/\D/g, '');
+
+    if (!sanitizedCode) {
+      throw new BadRequestException('Login code is required.');
+    }
+
+    return sanitizedCode;
+  }
+
+  private normalizeUsername(username: string): string {
+    const normalizedUsername = username
+      .trim()
+      .replace(/^https?:\/\/t\.me\//i, '')
+      .replace(/^@+/, '')
+      .trim();
+
+    if (!normalizedUsername) {
+      throw new BadRequestException(
+        'Username kiriting. Masalan: /stories durov',
+      );
+    }
+
+    if (!/^[a-zA-Z0-9_]{5,32}$/.test(normalizedUsername)) {
+      throw new BadRequestException(
+        'Username noto‘g‘ri. Masalan: /stories durov',
+      );
+    }
+
+    return normalizedUsername;
+  }
+
+  private async resolveStoryPeer(
+    normalizedUsername: string,
+  ): Promise<Api.TypeInputPeer> {
+    try {
+      const entity = await this.client.getEntity(normalizedUsername);
+      return await this.client.getInputEntity(entity);
+    } catch (error) {
+      throw this.mapStoryError(error, normalizedUsername);
+    }
+  }
+
+  private async downloadStoryMedia(
+    normalizedUsername: string,
+    story: Api.StoryItem,
+  ): Promise<DownloadedStoryMedia | null> {
+    const { media } = story;
+
+    if (
+      !(media instanceof Api.MessageMediaPhoto) &&
+      !(media instanceof Api.MessageMediaDocument)
+    ) {
+      this.logger.warn(
+        `Unsupported story media skipped for @${normalizedUsername} story=${story.id}`,
+      );
+      return null;
+    }
+
+    const downloadedMedia = await this.client.downloadMedia(media, {});
+    if (!downloadedMedia) {
+      this.logger.warn(
+        `Failed to download story media for @${normalizedUsername} story=${story.id}`,
+      );
+      return null;
+    }
+
+    const buffer = await this.ensureStoryBuffer(downloadedMedia);
+
+    if (media instanceof Api.MessageMediaPhoto) {
+      return {
+        buffer,
+        mimeType: 'image/jpeg',
+        filename: `story-${normalizedUsername}-${story.id}.jpg`,
+      };
+    }
+
+    const document = media.document;
+    const mimeType =
+      document instanceof Api.Document && document.mimeType
+        ? document.mimeType
+        : 'application/octet-stream';
+
+    return {
+      buffer,
+      mimeType,
+      filename: this.getStoryFilename(document, normalizedUsername, story.id),
+    };
+  }
+
+  private async ensureStoryBuffer(downloadedMedia: Buffer | string) {
+    if (Buffer.isBuffer(downloadedMedia)) {
+      return downloadedMedia;
+    }
+
+    const buffer = await fs.promises.readFile(downloadedMedia);
+    await fs.promises.unlink(downloadedMedia).catch(() => undefined);
+    return buffer;
+  }
+
+  private getStoryFilename(
+    document: Api.TypeDocument | undefined,
+    normalizedUsername: string,
+    storyId: number,
+  ): string {
+    if (document instanceof Api.Document) {
+      const fileNameAttribute = document.attributes.find(
+        (attribute): attribute is Api.DocumentAttributeFilename =>
+          attribute instanceof Api.DocumentAttributeFilename,
+      );
+
+      if (fileNameAttribute?.fileName) {
+        return fileNameAttribute.fileName;
+      }
+
+      return `story-${normalizedUsername}-${storyId}${this.getFileExtensionFromMimeType(
+        document.mimeType,
+      )}`;
+    }
+
+    return `story-${normalizedUsername}-${storyId}.bin`;
+  }
+
+  private getFileExtensionFromMimeType(mimeType: string): string {
+    switch (mimeType.toLowerCase()) {
+      case 'image/jpeg':
+      case 'image/jpg':
+        return '.jpg';
+      case 'image/png':
+        return '.png';
+      case 'image/webp':
+        return '.webp';
+      case 'video/mp4':
+        return '.mp4';
+      case 'video/webm':
+        return '.webm';
+      default:
+        return '.bin';
+    }
+  }
+
+  private mapStoryError(error: unknown, normalizedUsername: string): Error {
+    const message = this.getTelegramErrorMessage(error);
+
+    if (
+      message.includes('USERNAME_INVALID') ||
+      message.includes('USERNAME_NOT_OCCUPIED') ||
+      message.includes('Could not find the input entity') ||
+      message.includes('No user has') ||
+      message.includes('Cannot find any entity')
+    ) {
+      return new NotFoundException(
+        `Foydalanuvchi topilmadi: @${normalizedUsername}`,
+      );
+    }
+
+    if (
+      message.includes('FLOOD_WAIT') ||
+      message.includes('A wait of') ||
+      message.includes('FLOOD_PREMIUM_WAIT')
+    ) {
+      const seconds = this.extractFloodWaitSeconds(message);
+      const waitSuffix = seconds
+        ? ` ${seconds} soniyadan keyin urinib ko‘ring.`
+        : ' Birozdan keyin urinib ko‘ring.';
+      return new HttpException(
+        `Telegram vaqtincha cheklov qo‘ydi.${waitSuffix}`,
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
+    if (
+      message.includes('PRIVATE') ||
+      message.includes('FORBIDDEN') ||
+      message.includes('CHANNEL_PRIVATE') ||
+      message.includes('CHAT_ADMIN_REQUIRED')
+    ) {
+      return new ForbiddenException(
+        `@${normalizedUsername} storylarini ko‘rishga ruxsat yo‘q.`,
+      );
+    }
+
+    return new BadRequestException(
+      `@${normalizedUsername} storylarini olib bo‘lmadi.`,
+    );
+  }
+
+  private getTelegramErrorMessage(error: unknown): string {
+    if (error instanceof Error) {
+      return error.message;
+    }
+
+    return String(error);
+  }
+
+  private extractFloodWaitSeconds(message: string): string | null {
+    const match = message.match(
+      /(?:FLOOD(?:_PREMIUM)?_WAIT_?|\bwait of )(\d+)/i,
+    );
+    return match?.[1] ?? null;
+  }
 
   private ensureAuthorized() {
     if (this.loginState !== 'authorized') {
