@@ -20,6 +20,7 @@ import { USER_CLIENT_API_ROUTES } from './user-client.constants';
 import {
   LoginFlowResponse,
   LoginState,
+  PaginatedStoriesResult,
   StoryDownloadResult,
   StoryFetchStatus,
   StoryMediaItem,
@@ -44,6 +45,7 @@ class AppGramJsLogger extends GramJsLogger {
 
 @Injectable()
 export class UserClientService implements OnModuleInit {
+  private static readonly STORIES_PER_PAGE = 5;
   private readonly logger = new NestLogger(UserClientService.name);
 
   private client!: TelegramClient;
@@ -327,6 +329,10 @@ export class UserClientService implements OnModuleInit {
     return this.loginState;
   }
 
+  isAuthorized(): boolean {
+    return this.loginState === 'authorized';
+  }
+
   isWaitingForLoginInput(): boolean {
     return (
       this.loginState === 'waiting_phone' ||
@@ -445,6 +451,30 @@ export class UserClientService implements OnModuleInit {
     }
 
     return downloads;
+  }
+
+  async getUserStoriesPaginated(
+    username: string,
+    page = 0,
+  ): Promise<PaginatedStoriesResult> {
+    const normalizedPage = Math.max(0, page);
+    const allStories = await this.getAllUserStories(username);
+    const total = allStories.length;
+    const startIndex = normalizedPage * UserClientService.STORIES_PER_PAGE;
+    const storiesSlice = allStories.slice(
+      startIndex,
+      startIndex + UserClientService.STORIES_PER_PAGE,
+    );
+
+    return {
+      stories: await Promise.all(
+        storiesSlice.map((story) => this.downloadStoryMedia(story.storyItem)),
+      ),
+      page: normalizedPage,
+      total,
+      hasMore: startIndex + UserClientService.STORIES_PER_PAGE < total,
+      pagesCount: Math.ceil(total / UserClientService.STORIES_PER_PAGE),
+    };
   }
 
   async downloadStoryMedia(
@@ -815,6 +845,7 @@ export class UserClientService implements OnModuleInit {
 
       seenOffsets.add(nextOffsetId);
       offsetId = nextOffsetId;
+      await this.sleep(300);
     }
 
     return stories;
@@ -922,7 +953,7 @@ export class UserClientService implements OnModuleInit {
         media: story.media,
         storyItem: story,
       }))
-      .sort((left, right) => left.date - right.date);
+      .sort((left, right) => right.date - left.date);
   }
 
   private isDownloadableStoryMedia(

@@ -1,11 +1,21 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Command, Help, InjectBot, On, Start, Update } from 'nestjs-telegraf';
+import {
+  Action,
+  Command,
+  Help,
+  InjectBot,
+  On,
+  Start,
+  Update,
+} from 'nestjs-telegraf';
 import { Input, Markup, Telegraf } from 'telegraf';
+import { ReferralService } from '../referral/referral.service';
 import { UserClientService } from '../user-client/user-client.service';
 import { USER_CLIENT_API_ROUTES } from '../user-client/user-client.constants';
 import {
   LoginFlowResponse,
   LoginState,
+  PaginatedStoriesResult,
   StoryDownloadResult,
   UserClientStatus,
 } from '../user-client/user-client.types';
@@ -14,10 +24,14 @@ interface TelegrafContext {
   chat?: { id: number };
   from?: { id: number; username?: string; first_name?: string };
   message?: { text?: string; contact?: { phone_number: string } };
+  callbackQuery?: { data?: string; message?: { chat?: { id: number } } };
+  botInfo?: { username?: string };
+  match?: RegExpExecArray;
   reply: (text: string, extra?: object) => Promise<unknown>;
   replyWithDocument: (document: object, extra?: object) => Promise<unknown>;
   replyWithPhoto: (photo: object, extra?: object) => Promise<unknown>;
   replyWithVideo: (video: object, extra?: object) => Promise<unknown>;
+  answerCbQuery?: (text?: string) => Promise<unknown>;
 }
 
 @Update()
@@ -27,18 +41,25 @@ export class BotUpdate {
   private static readonly TELEGRAM_USERNAME_REGEX = /^@?([a-zA-Z0-9_]{5,32})$/;
   private static readonly TELEGRAM_USERNAME_LINK_REGEX =
     /^https?:\/\/t\.me\/([a-zA-Z0-9_]{5,32})\/?$/i;
+  private static readonly STORIES_PER_PAGE = 5;
   private readonly logger = new Logger(BotUpdate.name);
   private activeLoginChatId: number | null = null;
+  private botUsername: string | null = null;
 
   constructor(
     @InjectBot() private readonly bot: Telegraf,
     private readonly userClientService: UserClientService,
+    private readonly referralService: ReferralService,
   ) {}
 
   @Start()
   async onStart(ctx: TelegrafContext): Promise<void> {
     const name = ctx.from?.first_name ?? 'do‘st';
-    await this.replyHtml(ctx, this.formatStartMessage(name));
+    const isReferralRegistered = this.registerReferralFromStartPayload(ctx);
+    await this.replyHtml(
+      ctx,
+      this.formatStartMessage(name, isReferralRegistered),
+    );
   }
 
   @Help()
@@ -105,12 +126,42 @@ export class BotUpdate {
     if (!username) {
       await this.replyHtml(
         ctx,
-        'ℹ️ <b>Foydalanish</b>\n\nOddiy username yuboring:\n<code>durov</code>\n<code>@durov</code>\n<code>https://t.me/durov</code>',
+        'ℹ️ <b>Foydalanish</b>\n\n<code>/stories @username</code>\nYoki oddiy username yuboring:\n<code>durov</code>\n<code>@durov</code>\n<code>https://t.me/durov</code>',
       );
       return;
     }
 
     await this.handleStoriesRequest(ctx, username);
+  }
+
+  @Command('referral')
+  async onReferral(ctx: TelegrafContext): Promise<void> {
+    const userId = ctx.from?.id;
+    if (!userId) {
+      await this.replyHtml(ctx, '❌ <b>Foydalanuvchi aniqlanmadi</b>');
+      return;
+    }
+
+    const botUsername = await this.getBotUsername(ctx);
+    await this.replyHtml(
+      ctx,
+      this.formatReferralStatusMessage(userId, botUsername),
+    );
+  }
+
+  @Action(/^page:([^:]+):(\d+)$/)
+  async onPageCallback(ctx: TelegrafContext): Promise<void> {
+    const username = ctx.match?.[1];
+    const pageRaw = ctx.match?.[2];
+    const page = Number.parseInt(pageRaw ?? '', 10);
+
+    if (!username || Number.isNaN(page)) {
+      await ctx.answerCbQuery?.('Sahifa ma’lumoti noto‘g‘ri.');
+      return;
+    }
+
+    await ctx.answerCbQuery?.(`📄 ${page + 1}-sahifa yuklanmoqda...`);
+    await this.handleStoriesRequest(ctx, username, page);
   }
 
   @On('contact')
@@ -201,8 +252,8 @@ export class BotUpdate {
     }
   }
 
-  private formatStartMessage(name: string): string {
-    return [
+  private formatStartMessage(name: string, referred = false): string {
+    const lines = [
       `👋 <b>Salom, ${this.escapeHtml(name)}!</b>`,
       '',
       'Men Telegram Bot + User Bot yordamchisiman.',
@@ -212,9 +263,23 @@ export class BotUpdate {
       '/help — foydalanish bo‘yicha yordam',
       '/status — user-client holati',
       '/dialogs — so‘nggi chatlar',
-      '/stories @username — storylarni yuklash',
+      '/stories @username — storylarni yuklash (5 ta bepul)',
+      '/referral — referal holatini ko‘rish',
       'username yuboring — barcha storylarni yuklash',
-    ].join('\n');
+      '',
+      'ℹ️ Birinchi 5 ta story bepul. Ko‘proq olish uchun 5 ta do‘st taklif qiling.',
+    ];
+
+    if (referred) {
+      lines.splice(
+        3,
+        0,
+        '🎉 Siz do‘stingizning taklif havolasi orqali qo‘shildingiz.',
+        '',
+      );
+    }
+
+    return lines.join('\n');
   }
 
   private formatHelpMessage(): string {
@@ -227,7 +292,12 @@ export class BotUpdate {
       '<code>durov</code>',
       '<code>@durov</code>',
       '<code>https://t.me/durov</code>',
-      'Bot username uchun ko‘rinadigan storylarni yuklaydi.',
+      'Bot storylarni eng yangisidan boshlab 5 tadan yuboradi.',
+      'Birinchi 5 ta story bepul.',
+      '',
+      '<b>Referal</b>',
+      '<code>/referral</code>',
+      'Ko‘proq story ochish uchun 5 ta do‘st taklif qiling.',
       '',
       '<b>Session</b>',
       'End-user login qilmaydi.',
@@ -324,7 +394,7 @@ export class BotUpdate {
       case 'waiting_password':
         return '2 bosqichli parolni shu chatga yuboring.';
       case 'authorized':
-        return 'Akkaunt ulandi. Endi <code>/dialogs</code>, <code>/stories</code> va <code>/status</code> ishlaydi.';
+        return 'Akkaunt ulandi. Endi <code>/dialogs</code>, <code>/stories</code>, <code>/referral</code> va <code>/status</code> ishlaydi.';
       case 'error':
         return 'Session bilan muammo bor. Bot owner sessionni yangilashi kerak.';
       default:
@@ -359,12 +429,37 @@ export class BotUpdate {
     });
   }
 
+  private registerReferralFromStartPayload(ctx: TelegrafContext): boolean {
+    const payload = this.extractStartPayload(ctx.message?.text);
+    if (!payload?.startsWith('ref_')) {
+      return false;
+    }
+
+    const referrerId = Number.parseInt(payload.replace('ref_', ''), 10);
+    const newUserId = ctx.from?.id;
+
+    if (!newUserId || Number.isNaN(referrerId)) {
+      return false;
+    }
+
+    return this.referralService.registerReferral(referrerId, newUserId);
+  }
+
+  private extractStartPayload(text?: string): string | null {
+    if (!text) {
+      return null;
+    }
+
+    const match = text.match(/^\/start(?:@\w+)?(?:\s+(.+))?$/s);
+    return match?.[1]?.trim() || null;
+  }
+
   private async handleStoriesRequest(
     ctx: TelegrafContext,
     username: string,
+    page = 0,
   ): Promise<void> {
-    const status = this.userClientService.getStatus();
-    if (!status.authorized) {
+    if (!this.userClientService.isAuthorized()) {
       await this.replyHtml(
         ctx,
         '🔒 <b>User session tayyor emas</b>\n\nEnd-user login qilmaydi. Bot owner serverda <code>TELEGRAM_SESSION_STRING</code> yoki <code>SESSION_FILE</code> sozlashi kerak.',
@@ -378,16 +473,31 @@ export class BotUpdate {
       return;
     }
 
+    const userId = this.getUserId(ctx);
+    if (!userId) {
+      await this.replyHtml(ctx, '❌ <b>Foydalanuvchi aniqlanmadi</b>');
+      return;
+    }
+
     const normalizedUsername = this.normalizeDisplayUsername(username);
+
+    if (page >= 1 && !this.referralService.hasAccess(userId)) {
+      const botUsername = await this.getBotUsername(ctx);
+      await this.replyHtml(
+        ctx,
+        this.formatReferralGateMessage(userId, botUsername),
+      );
+      return;
+    }
 
     await this.replyHtml(
       ctx,
-      `⏳ <b>Barcha storylar yuklanmoqda...</b>\n\nManba: <code>@${this.escapeHtml(
+      `⏳ <b>@${this.escapeHtml(
         normalizedUsername,
-      )}</code>\nTuri: <code>ko‘rinadigan storylar</code>`,
+      )} — ${page + 1}-sahifa yuklanmoqda...</b>`,
     );
 
-    void this.processStoriesRequest(chatId, normalizedUsername);
+    void this.processStoriesRequest(chatId, normalizedUsername, page);
   }
 
   private extractStoriesUsername(text?: string): string | null {
@@ -431,37 +541,39 @@ export class BotUpdate {
   private async processStoriesRequest(
     chatId: number,
     normalizedUsername: string,
+    page: number,
   ): Promise<void> {
     try {
-      const stories =
-        await this.userClientService.getUserStories(normalizedUsername);
+      const result = await this.userClientService.getUserStoriesPaginated(
+        normalizedUsername,
+        page,
+      );
 
-      if (stories.length === 0) {
-        await this.sendHtmlToChat(
-          chatId,
-          '⚠️ Bu foydalanuvchida story topilmadi',
-        );
+      if (result.stories.length === 0) {
+        await this.sendHtmlToChat(chatId, '⚠️ Bu foydalanuvchida story yo‘q');
         return;
       }
 
       let uploadedStoriesCount = 0;
+      let failedStoriesCount = 0;
 
-      for (const [index, story] of stories.entries()) {
+      for (const [index, story] of result.stories.entries()) {
         try {
           await this.sendStoryMediaToChat(
             chatId,
             story,
-            this.formatStoryCaption(story),
+            this.formatStoryCaption(story, page, result.pagesCount),
           );
           uploadedStoriesCount += 1;
         } catch (error) {
+          failedStoriesCount += 1;
           this.logger.warn(
             `Story #${story.storyId} could not be sent for @${normalizedUsername}: ${this.getErrorMessage(error)}`,
           );
         }
 
-        if (index < stories.length - 1) {
-          await this.sleep(500);
+        if (index < result.stories.length - 1) {
+          await this.sleep(400);
         }
       }
 
@@ -473,9 +585,27 @@ export class BotUpdate {
         return;
       }
 
+      const startIndex = page * BotUpdate.STORIES_PER_PAGE + 1;
+      const endIndex = startIndex + result.stories.length - 1;
+      const paginationKeyboard = this.buildPaginationKeyboard(
+        normalizedUsername,
+        page,
+        result,
+      );
+
+      const summaryLines = [
+        `✅ <b>${startIndex}–${endIndex}</b> ta story yuklandi`,
+        `📦 Jami: <b>${result.total}</b> ta story`,
+      ];
+
+      if (failedStoriesCount > 0) {
+        summaryLines.push(`⚠️ Yuborilmadi: <b>${failedStoriesCount}</b> ta`);
+      }
+
       await this.sendHtmlToChat(
         chatId,
-        `✅ <b>Jami ${uploadedStoriesCount} ta story yuklandi</b>`,
+        summaryLines.join('\n'),
+        paginationKeyboard ? { reply_markup: paginationKeyboard } : {},
       );
     } catch (error) {
       this.logger.error(
@@ -488,9 +618,14 @@ export class BotUpdate {
     }
   }
 
-  private async sendHtmlToChat(chatId: number, text: string): Promise<void> {
+  private async sendHtmlToChat(
+    chatId: number,
+    text: string,
+    extra: object = {},
+  ): Promise<void> {
     await this.bot.telegram.sendMessage(chatId, text, {
       parse_mode: 'HTML',
+      ...extra,
     });
   }
 
@@ -519,8 +654,12 @@ export class BotUpdate {
     await this.bot.telegram.sendDocument(chatId, inputFile, { caption });
   }
 
-  private formatStoryCaption(story: StoryDownloadResult): string {
-    return `📅 ${this.formatStoryDate(story.date)} | Story #${story.storyId}`;
+  private formatStoryCaption(
+    story: StoryDownloadResult,
+    page: number,
+    pagesCount: number,
+  ): string {
+    return `📅 ${this.formatStoryDate(story.date)} | Story #${story.storyId} | Sahifa ${page + 1}/${pagesCount || 1}`;
   }
 
   private formatStoryDate(unixTimestamp: number): string {
@@ -528,6 +667,106 @@ export class BotUpdate {
       .toISOString()
       .replace('T', ' ')
       .replace('.000Z', ' UTC');
+  }
+
+  private buildPaginationKeyboard(
+    username: string,
+    currentPage: number,
+    result: PaginatedStoriesResult,
+  ):
+    | { inline_keyboard: { text: string; callback_data: string }[][] }
+    | undefined {
+    const buttons: { text: string; callback_data: string }[] = [];
+
+    if (currentPage > 0) {
+      buttons.push({
+        text: '⬅️ Oldingi',
+        callback_data: `page:${username}:${currentPage - 1}`,
+      });
+    }
+
+    if (result.hasMore) {
+      const nextStart = currentPage * BotUpdate.STORIES_PER_PAGE + 6;
+      const nextEnd = Math.min(
+        (currentPage + 1) * BotUpdate.STORIES_PER_PAGE + 5,
+        result.total,
+      );
+
+      buttons.push({
+        text: `Keyingi ➡️ (${nextStart}–${nextEnd})`,
+        callback_data: `page:${username}:${currentPage + 1}`,
+      });
+    }
+
+    if (buttons.length === 0) {
+      return undefined;
+    }
+
+    return { inline_keyboard: [buttons] };
+  }
+
+  private formatReferralStatusMessage(
+    userId: number,
+    botUsername: string,
+  ): string {
+    const referralCount = this.referralService.getReferralCount(userId);
+    const remainingReferrals =
+      this.referralService.getRemainingReferrals(userId);
+    const referralLink = this.referralService.generateReferralLink(
+      userId,
+      botUsername,
+    );
+
+    return [
+      '👥 <b>Referal holati</b>',
+      '',
+      `✅ Taklif qilganlar: <b>${referralCount}/${ReferralService.REQUIRED_REFERRALS}</b>`,
+      remainingReferrals > 0
+        ? `⚠️ Ko‘proq story uchun yana <b>${remainingReferrals} ta</b> do‘st kerak`
+        : '🎉 Siz barcha sahifalarni ochishingiz mumkin!',
+      '',
+      '🔗 Sizning havolangiz:',
+      `<code>${this.escapeHtml(referralLink)}</code>`,
+    ].join('\n');
+  }
+
+  private formatReferralGateMessage(
+    userId: number,
+    botUsername: string,
+  ): string {
+    const referralCount = this.referralService.getReferralCount(userId);
+    const remainingReferrals =
+      this.referralService.getRemainingReferrals(userId);
+    const referralLink = this.referralService.generateReferralLink(
+      userId,
+      botUsername,
+    );
+
+    return [
+      `🔒 Ko‘proq story yuklab olish uchun <b>${remainingReferrals} ta</b> do‘st taklif qiling!`,
+      '',
+      `👥 Sizning referallaringiz: <b>${referralCount}/${ReferralService.REQUIRED_REFERRALS}</b>`,
+      '',
+      '🔗 Taklif havolangiz:',
+      `<code>${this.escapeHtml(referralLink)}</code>`,
+      '',
+      'Do‘stlaringiz shu havola orqali botga kirsa, hisoblanadi ✅',
+    ].join('\n');
+  }
+
+  private async getBotUsername(ctx: TelegrafContext): Promise<string> {
+    if (ctx.botInfo?.username) {
+      this.botUsername = ctx.botInfo.username;
+      return ctx.botInfo.username;
+    }
+
+    if (this.botUsername) {
+      return this.botUsername;
+    }
+
+    const botInfo = await this.bot.telegram.getMe();
+    this.botUsername = botInfo.username ?? '';
+    return this.botUsername;
   }
 
   private sleep(ms: number): Promise<void> {
@@ -583,7 +822,16 @@ export class BotUpdate {
   }
 
   private getChatId(ctx: TelegrafContext): number | null {
-    return ctx.chat?.id ?? ctx.from?.id ?? null;
+    return (
+      ctx.chat?.id ??
+      ctx.callbackQuery?.message?.chat?.id ??
+      ctx.from?.id ??
+      null
+    );
+  }
+
+  private getUserId(ctx: TelegrafContext): number | null {
+    return ctx.from?.id ?? null;
   }
 
   private getErrorMessage(error: unknown): string {

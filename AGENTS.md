@@ -17,6 +17,7 @@ This project combines:
 2. A Telegram MTProto user client for dialogs, messaging, and account actions
 3. A REST API used to inspect and control the user client
 4. A story downloader flow for fetching Telegram stories by username
+5. A referral-gated pagination flow for unlocking additional story pages
 
 ## Important Files
 
@@ -75,7 +76,7 @@ When validating changes, prefer:
 - Keep bot replies concise and user-friendly
 - Bot messages currently follow an Uzbek-first UX; preserve that unless the user asks otherwise
 - When returning formatted Telegram text, use HTML formatting compatible with Telegraf
-- `/stories <username>` is implemented in the bot layer and should stay user-friendly and step-based
+- `/stories <username>` and `/referral` are implemented in the bot layer and should stay user-friendly and step-based
 
 ### User Client Layer
 
@@ -126,6 +127,9 @@ When validating changes, prefer:
 - Validate authorization before trying to fetch stories
 - Fetch stories through Telegram story APIs, not ad-hoc workarounds
 - Download story media through the Telegram client and return typed media objects
+- Return newest stories first
+- Default to paginated story delivery (5 per page) in the bot UX
+- Keep page 0 free and gate page 1+ behind the referral rules
 - Support at least:
   - photo stories
   - video stories
@@ -136,6 +140,7 @@ When validating changes, prefer:
   - private / access denied
   - rate limit / flood wait
   - no stories found
+- Referral-gated pages should explain how many more invites are needed and show the user referral link
 - If temporary files are ever created during story download, they must be cleaned up
 
 ## Login Flow Rules
