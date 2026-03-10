@@ -179,6 +179,10 @@ If tests are added or affected, run the smallest relevant test command.
 - Do not move story-fetching business logic into the bot handler
 - Do not hardcode secrets or real tokens into tracked files
 - Do not rewrite unrelated files just for formatting
+- Do not commit directly to `main`
+- Do not open PRs without passing `npm run build`
+- Do not combine unrelated changes in one PR
+- Do not merge your own PR without review if working in a team
 
 ## When Updating Documentation
 
@@ -191,3 +195,133 @@ Update docs when behavior changes in any of these areas:
 - REST endpoints
 
 If no full documentation update is needed, at least keep this file accurate.
+
+## Git Workflow Rules
+
+Every code change must follow this workflow.
+
+### Branch Naming Convention
+
+Format: `<type>/<short-description>`
+
+Types:
+
+- `feat/` — new feature
+- `fix/` — bug fix
+- `refactor/` — code restructure, no behavior change
+- `chore/` — config, deps, tooling
+- `docs/` — documentation only
+
+Examples:
+
+- `feat/story-pagination`
+- `feat/referral-gate`
+- `fix/inline-query-handler`
+- `docs/update-agents-md`
+
+### Required Workflow
+
+1. Pull latest `main`
+   - `git checkout main`
+   - `git pull origin main`
+2. Create a new branch
+   - `git checkout -b feat/your-feature-name`
+3. Make code changes
+4. Validate before committing
+   - `npm run build`
+   - `npx eslint src/<changed-file>.ts`
+5. Stage and commit
+   - `git add .`
+   - `git commit -m "<type>(<scope>): <short description>"`
+6. Push branch
+   - `git push origin feat/your-feature-name`
+7. Open Pull Request
+   - Title: same as commit message
+   - Body: use `.github/pull_request_template.md`
+   - Base branch: `main`
+
+### Commit Message Format
+
+Follow Conventional Commits:
+
+- `feat(stories): add pagination with 5 stories per page`
+- `feat(referral): gate story page 2+ behind referral count`
+- `fix(inline): handle empty username query gracefully`
+- `refactor(user-client): extract story fetch into helper methods`
+- `docs(agents): add git workflow rules`
+- `chore(bot): update BotFather commands list`
+
+### Pull Request Template
+
+Use `.github/pull_request_template.md` for every PR.
+
+### Feature Branch Examples
+
+#### Branch 1 — Core story downloader
+
+```bash
+git checkout main && git pull origin main
+git checkout -b feat/story-downloader
+git add .
+git commit -m "feat(stories): add getAllUserStories with active, pinned and archived fetch"
+git push origin feat/story-downloader
+```
+
+#### Branch 2 — Newest first + pagination
+
+```bash
+git checkout main && git pull origin main
+git checkout -b feat/story-pagination
+git add .
+git commit -m "feat(stories): sort newest-first and add 5-per-page pagination"
+git push origin feat/story-pagination
+```
+
+#### Branch 3 — Referral gate
+
+```bash
+git checkout main && git pull origin main
+git checkout -b feat/referral-gate
+git add .
+git commit -m "feat(referral): gate story page 2+ behind 5 referral invite requirement"
+git push origin feat/referral-gate
+```
+
+#### Branch 4 — Inline mode
+
+```bash
+git checkout main && git pull origin main
+git checkout -b feat/inline-mode
+git add .
+git commit -m "feat(inline): add inline query support for story download and count"
+git push origin feat/inline-mode
+```
+
+#### Branch 5 — Bot settings + help update
+
+```bash
+git checkout main && git pull origin main
+git checkout -b chore/bot-settings
+git add .
+git commit -m "chore(bot): update help command to match BotFather configuration"
+git push origin chore/bot-settings
+```
+
+#### Branch 6 — AGENTS.md git workflow
+
+```bash
+git checkout main && git pull origin main
+git checkout -b docs/agents-git-workflow
+git add .
+git commit -m "docs(agents): add git workflow rules, branch naming and PR template"
+git push origin docs/agents-git-workflow
+```
+
+### Rules
+
+- Never commit directly to `main`
+- Never force push to `main`
+- Every PR must have `npm run build` passing before merge
+- One feature = one branch = one PR
+- Keep PRs small and focused
+- Delete branch after merge
