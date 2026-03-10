@@ -508,6 +508,57 @@ Never skip step 1 before committing.
 
 ---
 
+## Production Checklist
+
+### Build & Config
+
+- `npm run build` passes with zero errors
+- Required env vars are validated on startup
+- `NODE_ENV=production` is set in production deploys
+- No secrets are committed to tracked files
+
+### Security
+
+- `helmet()` is enabled when exposing HTTP endpoints publicly
+- CORS stays disabled unless a browser client explicitly requires it
+- Global `ValidationPipe` keeps `whitelist: true`
+- Sensitive production errors do not expose stack traces to clients
+
+### Database
+
+- Run `npx drizzle-kit push` before deploys that change schema
+- `DATABASE_URL` must use Neon/PostgreSQL SSL settings in production
+- DB reads and writes go through `UserRepository`
+- Repository methods should fail clearly and log safely on DB errors
+
+### Bot
+
+- MTProto session persistence remains intact and is backed up
+- Graceful shutdown disconnects the Telegram user client cleanly
+- Run a single bot instance in PM2 fork mode unless the bot is made multi-instance safe
+
+### PM2
+
+- `ecosystem.config.cjs` stays committed and current
+- `max_memory_restart` is configured for production
+- `autorestart` remains enabled
+- Run `pm2 save` after successful start
+- Run `pm2 startup` on servers that must survive reboots
+
+### Monitoring
+
+- `GET /api/health` should return `200` in production
+- PM2 logs should be rotated or managed externally
+- Error logs should be monitored after deploys
+
+### Deploy
+
+- Use a repeatable deploy script or a fixed deploy sequence
+- Run a health check after every deploy
+- Keep a rollback path ready: revert, rebuild, restart
+
+---
+
 ## Things To Avoid
 
 - Do not commit directly to `main`
