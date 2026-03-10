@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TelegrafModule } from 'nestjs-telegraf';
+import { ScheduleModule } from '@nestjs/schedule';
+import { AdminModule } from './admin/admin.module';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { BotModule } from './bot/bot.module';
@@ -17,6 +19,8 @@ import { UserClientModule } from './user-client/user-client.module';
       envFilePath: '.env',
     }),
 
+    ScheduleModule.forRoot(),
+
     // ── Telegram Bot (Bot API via Telegraf) ─────────────────────────────────
     TelegrafModule.forRootAsync({
       imports: [ConfigModule],
@@ -30,6 +34,9 @@ import { UserClientModule } from './user-client/user-client.module';
 
     // ── Database (Drizzle ORM + NeonDB) ─────────────────────────────────────
     DatabaseModule,
+
+    // ── Admin notifications + scheduled stats ───────────────────────────────
+    AdminModule,
 
     // ── User bot (MTProto via gramjs) ───────────────────────────────────────
     UserClientModule,

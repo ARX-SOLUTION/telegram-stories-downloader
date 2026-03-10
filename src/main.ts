@@ -1,10 +1,12 @@
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { AdminNotificationService } from './admin/admin-notification.service';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const logger = new Logger('Bootstrap');
+  app.enableShutdownHooks();
 
   // Global validation for all DTOs
   app.useGlobalPipes(
@@ -20,6 +22,9 @@ async function bootstrap() {
 
   const port = process.env.PORT ?? 3000;
   await app.listen(port);
+
+  const adminNotificationService = app.get(AdminNotificationService);
+  await adminNotificationService.notifyBotStarted();
 
   logger.log(`🚀 Application running on http://localhost:${port}/api`);
   logger.log(`📡 User-bot endpoints: http://localhost:${port}/api/user-client`);
