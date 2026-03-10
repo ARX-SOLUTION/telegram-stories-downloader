@@ -19,6 +19,7 @@ export interface UserClientStatus {
   loginState: LoginState;
   connected: boolean;
   authorized: boolean;
+  phoneNumber?: string | null;
   nextAction?: string;
   lastError?: string | null;
 }
