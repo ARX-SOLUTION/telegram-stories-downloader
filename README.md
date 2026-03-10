@@ -44,6 +44,27 @@ $ pnpm run start:dev
 $ pnpm run start:prod
 ```
 
+## PM2
+
+```bash
+# install pm2 globally if needed
+$ npm install -g pm2
+
+# build and start
+$ npm run pm2:start
+
+# restart after changes
+$ npm run pm2:restart
+
+# view logs
+$ npm run pm2:logs
+
+# stop process
+$ npm run pm2:stop
+```
+
+PM2 uses `ecosystem.config.cjs` and starts the compiled app from `dist/main.js`.
+
 ## Run tests
 
 ```bash

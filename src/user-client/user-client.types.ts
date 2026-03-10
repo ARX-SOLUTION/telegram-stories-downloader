@@ -1,3 +1,5 @@
+import { Api } from 'telegram';
+
 export type LoginState =
   | 'idle'
   | 'waiting_phone'
@@ -21,7 +23,17 @@ export interface UserClientStatus {
   lastError?: string | null;
 }
 
-export interface DownloadedStoryMedia {
+export interface StoryMediaItem {
+  id: number;
+  date: number;
+  isPinned: boolean;
+  isExpired: boolean;
+  media: Api.TypeMessageMedia;
+  storyItem: Api.StoryItem;
+}
+
+export interface StoryDownloadResult {
+  storyId: number;
   buffer: Buffer;
   mimeType: string;
   filename: string;

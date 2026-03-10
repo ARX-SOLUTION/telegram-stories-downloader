@@ -18,9 +18,10 @@ import { LogLevel } from 'telegram/extensions/Logger';
 import { StringSession } from 'telegram/sessions';
 import { USER_CLIENT_API_ROUTES } from './user-client.constants';
 import {
-  DownloadedStoryMedia,
   LoginFlowResponse,
   LoginState,
+  StoryDownloadResult,
+  StoryMediaItem,
   UserClientStatus,
 } from './user-client.types';
 
@@ -322,7 +323,7 @@ export class UserClientService implements OnModuleInit {
     }));
   }
 
-  async getUserStories(username: string): Promise<DownloadedStoryMedia[]> {
+  async getAllUserStories(username: string): Promise<StoryMediaItem[]> {
     this.ensureAuthorized();
 
     const normalizedUsername = this.normalizeUsername(username);
@@ -384,16 +385,59 @@ export class UserClientService implements OnModuleInit {
       return [];
     }
 
-    const stories: DownloadedStoryMedia[] = [];
+    return this.toStoryMediaItems(this.mergeStoryItems(storyItems));
+  }
 
-    for (const story of storyItems) {
-      const media = await this.downloadStoryMedia(normalizedUsername, story);
-      if (media) {
-        stories.push(media);
-      }
+  async getUserStories(username: string): Promise<StoryDownloadResult[]> {
+    const stories = await this.getAllUserStories(username);
+    const downloads: StoryDownloadResult[] = [];
+
+    for (const story of stories) {
+      downloads.push(await this.downloadStoryMedia(story.storyItem));
     }
 
-    return stories;
+    return downloads;
+  }
+
+  async downloadStoryMedia(
+    storyItem: Api.StoryItem,
+  ): Promise<StoryDownloadResult> {
+    const { media } = storyItem;
+
+    if (!this.isDownloadableStoryMedia(media)) {
+      throw new BadRequestException(`Story #${storyItem.id} media topilmadi.`);
+    }
+
+    const downloadedMedia = await this.client.downloadMedia(media, {});
+    if (!downloadedMedia) {
+      throw new BadRequestException(
+        `Story #${storyItem.id} media yuklab bo‘lmadi.`,
+      );
+    }
+
+    const buffer = await this.ensureStoryBuffer(downloadedMedia);
+
+    if (media instanceof Api.MessageMediaPhoto) {
+      return {
+        storyId: storyItem.id,
+        buffer,
+        mimeType: 'image/jpeg',
+        filename: `story-${storyItem.id}.jpg`,
+      };
+    }
+
+    const document = media.document;
+    const mimeType =
+      document instanceof Api.Document && document.mimeType
+        ? document.mimeType
+        : 'application/octet-stream';
+
+    return {
+      storyId: storyItem.id,
+      buffer,
+      mimeType,
+      filename: this.getStoryFilename(document, storyItem.id),
+    };
   }
 
   private setupEventHandlers() {
@@ -628,53 +672,6 @@ export class UserClientService implements OnModuleInit {
     }
   }
 
-  private async downloadStoryMedia(
-    normalizedUsername: string,
-    story: Api.StoryItem,
-  ): Promise<DownloadedStoryMedia | null> {
-    const { media } = story;
-
-    if (
-      !(media instanceof Api.MessageMediaPhoto) &&
-      !(media instanceof Api.MessageMediaDocument)
-    ) {
-      this.logger.warn(
-        `Unsupported story media skipped for @${normalizedUsername} story=${story.id}`,
-      );
-      return null;
-    }
-
-    const downloadedMedia = await this.client.downloadMedia(media, {});
-    if (!downloadedMedia) {
-      this.logger.warn(
-        `Failed to download story media for @${normalizedUsername} story=${story.id}`,
-      );
-      return null;
-    }
-
-    const buffer = await this.ensureStoryBuffer(downloadedMedia);
-
-    if (media instanceof Api.MessageMediaPhoto) {
-      return {
-        buffer,
-        mimeType: 'image/jpeg',
-        filename: `story-${normalizedUsername}-${story.id}.jpg`,
-      };
-    }
-
-    const document = media.document;
-    const mimeType =
-      document instanceof Api.Document && document.mimeType
-        ? document.mimeType
-        : 'application/octet-stream';
-
-    return {
-      buffer,
-      mimeType,
-      filename: this.getStoryFilename(document, normalizedUsername, story.id),
-    };
-  }
-
   private async getActiveStories(
     peer: Api.TypeInputPeer,
   ): Promise<Api.StoryItem[]> {
@@ -682,13 +679,13 @@ export class UserClientService implements OnModuleInit {
       new Api.stories.GetPeerStories({ peer }),
     );
 
-    return this.extractStoryItems(response.stories.stories);
+    return this.resolveStoryItems(peer, response.stories.stories);
   }
 
   private async getPinnedStories(
     peer: Api.TypeInputPeer,
   ): Promise<Api.StoryItem[]> {
-    return this.getPagedStories((offsetId, limit) =>
+    return this.getPagedStories(peer, (offsetId, limit) =>
       this.client.invoke(
         new Api.stories.GetPinnedStories({
           peer,
@@ -702,7 +699,7 @@ export class UserClientService implements OnModuleInit {
   private async getArchivedStories(
     peer: Api.TypeInputPeer,
   ): Promise<Api.StoryItem[]> {
-    return this.getPagedStories((offsetId, limit) =>
+    return this.getPagedStories(peer, (offsetId, limit) =>
       this.client.invoke(
         new Api.stories.GetStoriesArchive({
           peer,
@@ -722,6 +719,7 @@ export class UserClientService implements OnModuleInit {
   }
 
   private async getPagedStories(
+    peer: Api.TypeInputPeer,
     pageLoader: (
       offsetId: number,
       limit: number,
@@ -734,16 +732,17 @@ export class UserClientService implements OnModuleInit {
 
     while (true) {
       const response = await pageLoader(offsetId, limit);
-      const pageStories = this.extractStoryItems(response.stories);
+      const pageStoryIds = this.extractStoryIds(response.stories);
+      const pageStories = await this.resolveStoryItems(peer, response.stories);
 
-      if (pageStories.length === 0) {
+      if (pageStoryIds.length === 0) {
         break;
       }
 
       stories.push(...pageStories);
 
-      const nextOffsetId = pageStories[pageStories.length - 1].id;
-      if (pageStories.length < limit || seenOffsets.has(nextOffsetId)) {
+      const nextOffsetId = pageStoryIds[pageStoryIds.length - 1];
+      if (pageStoryIds.length < limit || seenOffsets.has(nextOffsetId)) {
         break;
       }
 
@@ -760,6 +759,77 @@ export class UserClientService implements OnModuleInit {
     );
   }
 
+  private extractSkippedStoryIds(stories: Api.TypeStoryItem[]): number[] {
+    return stories
+      .filter(
+        (story): story is Api.StoryItemSkipped =>
+          story instanceof Api.StoryItemSkipped,
+      )
+      .map((story) => story.id);
+  }
+
+  private extractStoryIds(stories: Api.TypeStoryItem[]): number[] {
+    return stories
+      .filter(
+        (
+          story,
+        ): story is
+          | Api.StoryItem
+          | Api.StoryItemSkipped
+          | Api.StoryItemDeleted =>
+          story instanceof Api.StoryItem ||
+          story instanceof Api.StoryItemSkipped ||
+          story instanceof Api.StoryItemDeleted,
+      )
+      .map((story) => story.id);
+  }
+
+  private async resolveStoryItems(
+    peer: Api.TypeInputPeer,
+    stories: Api.TypeStoryItem[],
+  ): Promise<Api.StoryItem[]> {
+    const items = this.extractStoryItems(stories);
+    const skippedIds = this.extractSkippedStoryIds(stories);
+
+    if (skippedIds.length === 0) {
+      return items;
+    }
+
+    try {
+      const skippedItems = await this.getStoriesByIds(peer, skippedIds);
+      return this.mergeStoryItems([...items, ...skippedItems]);
+    } catch (error) {
+      this.logger.warn(
+        `Skipped story items could not be expanded: ${this.getTelegramErrorMessage(
+          error,
+        )}`,
+      );
+      return items;
+    }
+  }
+
+  private async getStoriesByIds(
+    peer: Api.TypeInputPeer,
+    storyIds: number[],
+  ): Promise<Api.StoryItem[]> {
+    const resolvedStories: Api.StoryItem[] = [];
+    const batchSize = 100;
+
+    for (let index = 0; index < storyIds.length; index += batchSize) {
+      const batchIds = storyIds.slice(index, index + batchSize);
+      const response = await this.client.invoke(
+        new Api.stories.GetStoriesByID({
+          peer,
+          id: batchIds,
+        }),
+      );
+
+      resolvedStories.push(...this.extractStoryItems(response.stories));
+    }
+
+    return resolvedStories;
+  }
+
   private mergeStoryItems(stories: Api.StoryItem[]): Api.StoryItem[] {
     const storyMap = new Map<number, Api.StoryItem>();
 
@@ -770,6 +840,31 @@ export class UserClientService implements OnModuleInit {
     }
 
     return [...storyMap.values()].sort((left, right) => right.date - left.date);
+  }
+
+  private toStoryMediaItems(stories: Api.StoryItem[]): StoryMediaItem[] {
+    const now = Math.floor(Date.now() / 1000);
+
+    return stories
+      .filter((story) => this.isDownloadableStoryMedia(story.media))
+      .map((story) => ({
+        id: story.id,
+        date: story.date,
+        isPinned: Boolean(story.pinned),
+        isExpired: story.expireDate <= now,
+        media: story.media,
+        storyItem: story,
+      }))
+      .sort((left, right) => left.date - right.date);
+  }
+
+  private isDownloadableStoryMedia(
+    media: Api.TypeMessageMedia | undefined,
+  ): media is Api.MessageMediaPhoto | Api.MessageMediaDocument {
+    return (
+      media instanceof Api.MessageMediaPhoto ||
+      media instanceof Api.MessageMediaDocument
+    );
   }
 
   private async ensureStoryBuffer(downloadedMedia: Buffer | string) {
@@ -784,7 +879,6 @@ export class UserClientService implements OnModuleInit {
 
   private getStoryFilename(
     document: Api.TypeDocument | undefined,
-    normalizedUsername: string,
     storyId: number,
   ): string {
     if (document instanceof Api.Document) {
@@ -797,12 +891,10 @@ export class UserClientService implements OnModuleInit {
         return fileNameAttribute.fileName;
       }
 
-      return `story-${normalizedUsername}-${storyId}${this.getFileExtensionFromMimeType(
-        document.mimeType,
-      )}`;
+      return `story-${storyId}${this.getFileExtensionFromMimeType(document.mimeType)}`;
     }
 
-    return `story-${normalizedUsername}-${storyId}.bin`;
+    return `story-${storyId}.bin`;
   }
 
   private getFileExtensionFromMimeType(mimeType: string): string {

@@ -4,9 +4,10 @@ import { Input, Markup, Telegraf } from 'telegraf';
 import { UserClientService } from '../user-client/user-client.service';
 import { USER_CLIENT_API_ROUTES } from '../user-client/user-client.constants';
 import {
-  DownloadedStoryMedia,
   LoginFlowResponse,
   LoginState,
+  StoryDownloadResult,
+  StoryMediaItem,
   UserClientStatus,
 } from '../user-client/user-client.types';
 
@@ -23,6 +24,7 @@ interface TelegrafContext {
 @Update()
 @Injectable()
 export class BotUpdate {
+  private static readonly TELEGRAM_VIDEO_LIMIT_BYTES = 50 * 1024 * 1024;
   private readonly logger = new Logger(BotUpdate.name);
   private activeLoginChatId: number | null = null;
 
@@ -240,6 +242,7 @@ export class BotUpdate {
       '/help — foydalanish bo‘yicha yordam',
       '/status — user-client holati',
       '/dialogs — so‘nggi chatlar',
+      '/stories @username — storylarni yuklash',
       'username yuboring — barcha storylarni yuklash',
     ].join('\n');
   }
@@ -249,6 +252,7 @@ export class BotUpdate {
       '📘 <b>Yordam</b>',
       '',
       '<b>Story yuklash</b>',
+      '<code>/stories @durov</code>',
       'Oddiy username yuboring:',
       '<code>durov</code>',
       '<code>@durov</code>',
@@ -463,32 +467,13 @@ export class BotUpdate {
       .replace(/^@+/, '');
   }
 
-  private async sendStoryMedia(
-    ctx: TelegrafContext,
-    story: DownloadedStoryMedia,
-  ): Promise<void> {
-    const inputFile = Input.fromBuffer(story.buffer, story.filename);
-
-    if (story.mimeType.startsWith('image/')) {
-      await ctx.replyWithPhoto(inputFile);
-      return;
-    }
-
-    if (story.mimeType.startsWith('video/')) {
-      await ctx.replyWithVideo(inputFile);
-      return;
-    }
-
-    await ctx.replyWithDocument(inputFile);
-  }
-
   private async processStoriesRequest(
     chatId: number,
     normalizedUsername: string,
   ): Promise<void> {
     try {
       const stories =
-        await this.userClientService.getUserStories(normalizedUsername);
+        await this.userClientService.getAllUserStories(normalizedUsername);
 
       if (stories.length === 0) {
         await this.sendHtmlToChat(
@@ -498,13 +483,40 @@ export class BotUpdate {
         return;
       }
 
-      for (const story of stories) {
-        await this.sendStoryMediaToChat(chatId, story);
+      let uploadedStoriesCount = 0;
+
+      for (const [index, story] of stories.entries()) {
+        try {
+          const downloadResult =
+            await this.userClientService.downloadStoryMedia(story.storyItem);
+          await this.sendStoryMediaToChat(
+            chatId,
+            downloadResult,
+            this.formatStoryCaption(story),
+          );
+          uploadedStoriesCount += 1;
+        } catch (error) {
+          this.logger.warn(
+            `Story #${story.id} could not be sent for @${normalizedUsername}: ${this.getErrorMessage(error)}`,
+          );
+        }
+
+        if (index < stories.length - 1) {
+          await this.sleep(500);
+        }
+      }
+
+      if (uploadedStoriesCount === 0) {
+        await this.sendHtmlToChat(
+          chatId,
+          `❌ <b>Xatolik</b>\n\n${this.escapeHtml(`@${normalizedUsername} storylarini yuborib bo‘lmadi.`)}`,
+        );
+        return;
       }
 
       await this.sendHtmlToChat(
         chatId,
-        `✅ <b>${stories.length} ta story yuklandi</b>`,
+        `✅ <b>Jami ${uploadedStoriesCount} ta story yuklandi</b>`,
       );
     } catch (error) {
       this.logger.error(
@@ -525,21 +537,47 @@ export class BotUpdate {
 
   private async sendStoryMediaToChat(
     chatId: number,
-    story: DownloadedStoryMedia,
+    story: StoryDownloadResult,
+    caption: string,
   ): Promise<void> {
     const inputFile = Input.fromBuffer(story.buffer, story.filename);
 
     if (story.mimeType.startsWith('image/')) {
-      await this.bot.telegram.sendPhoto(chatId, inputFile);
+      await this.bot.telegram.sendPhoto(chatId, inputFile, { caption });
       return;
     }
 
     if (story.mimeType.startsWith('video/')) {
-      await this.bot.telegram.sendVideo(chatId, inputFile);
+      if (story.buffer.length > BotUpdate.TELEGRAM_VIDEO_LIMIT_BYTES) {
+        await this.bot.telegram.sendDocument(chatId, inputFile, { caption });
+        return;
+      }
+
+      await this.bot.telegram.sendVideo(chatId, inputFile, { caption });
       return;
     }
 
-    await this.bot.telegram.sendDocument(chatId, inputFile);
+    await this.bot.telegram.sendDocument(chatId, inputFile, { caption });
+  }
+
+  private formatStoryCaption(story: StoryMediaItem): string {
+    const flags = [
+      story.isPinned ? 'pinned' : null,
+      story.isExpired ? 'expired' : 'active',
+    ].filter(Boolean);
+
+    return `Story #${story.id} | ${this.formatStoryDate(story.date)}${flags.length > 0 ? ` | ${flags.join(', ')}` : ''}`;
+  }
+
+  private formatStoryDate(unixTimestamp: number): string {
+    return new Date(unixTimestamp * 1000)
+      .toISOString()
+      .replace('T', ' ')
+      .replace('.000Z', ' UTC');
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private captureLoginChat(chatId: number | null, state: LoginState) {
