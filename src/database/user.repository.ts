@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import { NeonHttpDatabase } from 'drizzle-orm/neon-http';
-import { DRIZZLE } from './database.module';
+import { DRIZZLE } from './database.constants';
 import * as schema from './schema';
 import { UpsertTelegramUserInput, User, users } from './schema';
 
