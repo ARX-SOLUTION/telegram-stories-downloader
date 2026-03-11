@@ -1,6 +1,7 @@
 export default () => ({
   port: parseInt(process.env.PORT ?? '3000', 10),
   admin: {
+    chatId: parseInt(process.env.ADMIN_TELEGRAM_CHAT_ID ?? '0', 10),
     telegramId: parseInt(process.env.ADMIN_TELEGRAM_ID ?? '0', 10),
   },
   database: {

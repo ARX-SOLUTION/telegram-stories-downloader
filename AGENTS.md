@@ -55,7 +55,8 @@ This project combines:
 | Variable                  | Description                                                          |
 | ------------------------- | -------------------------------------------------------------------- |
 | `PORT`                    | HTTP server port                                                     |
-| `ADMIN_TELEGRAM_ID`       | Optional Telegram user ID for admin notifications                    |
+| `ADMIN_TELEGRAM_CHAT_ID`  | Optional dedicated Telegram group/channel chat ID for admin alerts   |
+| `ADMIN_TELEGRAM_ID`       | Legacy fallback for admin notifications                              |
 | `DATABASE_URL`            | NeonDB/PostgreSQL connection string                                  |
 | `TELEGRAM_API_ID`         | MTProto App ID from my.telegram.org                                  |
 | `TELEGRAM_API_HASH`       | MTProto App Hash from my.telegram.org                                |
@@ -67,7 +68,8 @@ This project combines:
 Notes:
 
 - `SESSION_FILE` is relative to the project root unless explicitly changed
-- `ADMIN_TELEGRAM_ID` is optional; when omitted, admin notifications are skipped safely
+- `ADMIN_TELEGRAM_CHAT_ID` is the preferred target for admin alerts
+- Positive `ADMIN_TELEGRAM_ID` private-user targets are ignored by default to keep admin logs out of the bot DM
 - `DATABASE_URL` is required when running the Drizzle-backed user persistence and referral flow
 - The MTProto session is persisted to disk — never break this flow when refactoring login logic
 - Prefer `TELEGRAM_SESSION_STRING` when the bot should run without asking end-users to login
@@ -175,6 +177,7 @@ When validating changes, prefer:
 
 - `AdminNotificationService` sends Telegram alerts for new users, referrals, downloads, errors, and lifecycle events
 - `AdminStatsService` sends daily stats in the `Asia/Tashkent` timezone
+- Admin alerts should go to a dedicated group/channel chat via `ADMIN_TELEGRAM_CHAT_ID`
 - Admin notifications must never crash the app; failures are logged and swallowed
 
 ### REST Layer
