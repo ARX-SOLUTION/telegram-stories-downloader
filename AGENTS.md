@@ -64,6 +64,9 @@ This project combines:
 | `TELEGRAM_SESSION_STRING` | Optional pre-authorized MTProto session string                       |
 | `TELEGRAM_LOG_LEVEL`      | Optional GramJS log level (`none`, `error`, `warn`, `info`, `debug`) |
 | `SESSION_FILE`            | Relative path to MTProto session file                                |
+| `YOUTUBE_COOKIES_FILE`    | Optional Netscape-format cookies file for restricted YouTube media   |
+| `YOUTUBE_COOKIES_FROM_BROWSER` | Optional `yt-dlp` browser cookie source for dev machines       |
+| `YOUTUBE_EXTRACTOR_CLIENTS` | Optional `yt-dlp` YouTube extractor client list                    |
 
 Notes:
 
@@ -74,6 +77,7 @@ Notes:
 - The MTProto session is persisted to disk — never break this flow when refactoring login logic
 - Prefer `TELEGRAM_SESSION_STRING` when the bot should run without asking end-users to login
 - Prefer `TELEGRAM_LOG_LEVEL=warn` or `error` in production to reduce noisy GramJS logs
+- Restricted YouTube media may require `YOUTUBE_COOKIES_FILE` on the server
 - Never hardcode secrets or real tokens into tracked files
 
 ---
@@ -146,6 +150,7 @@ When validating changes, prefer:
 - All keyboards come from `BotKeyboards.*` — never hardcode inline keyboards in handlers
 - Every `ctx.reply()` and `ctx.editMessageText()` must use `{ parse_mode: 'HTML' }`
 - Escape all dynamic content (usernames, phone numbers, links) with `escapeHtml()` before rendering
+- YouTube downloads use `yt-dlp`; auth-gated videos should rely on env-configured cookies, not hardcoded credentials
 
 ### User Client Layer
 

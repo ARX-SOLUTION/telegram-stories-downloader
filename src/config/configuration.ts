@@ -15,4 +15,10 @@ export default () => ({
     sessionString: process.env.TELEGRAM_SESSION_STRING ?? '',
     sessionFile: process.env.SESSION_FILE ?? 'session.txt',
   },
+  youtube: {
+    cookiesFile: process.env.YOUTUBE_COOKIES_FILE ?? '',
+    cookiesFromBrowser: process.env.YOUTUBE_COOKIES_FROM_BROWSER ?? '',
+    extractorClients:
+      process.env.YOUTUBE_EXTRACTOR_CLIENTS ?? 'android,ios,web',
+  },
 });
