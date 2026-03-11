@@ -12,6 +12,10 @@ import { Input, Markup, Telegraf } from 'telegraf';
 import { AdminNotificationService } from '../admin/admin-notification.service';
 import { BotKeyboards } from './bot-keyboards';
 import { BotMessages } from './bot-messages';
+import {
+  YoutubeDownloadException,
+  YoutubeDownloadService,
+} from './youtube-download.service';
 import { UserRepository } from '../database/user.repository';
 import {
   ReferralAccessStatus,
@@ -52,7 +56,9 @@ export class BotUpdate {
   private static readonly TELEGRAM_VIDEO_LIMIT_BYTES = 50 * 1024 * 1024;
   private static readonly TELEGRAM_USERNAME_REGEX = /^@?([a-zA-Z0-9_]{5,32})$/;
   private static readonly TELEGRAM_USERNAME_LINK_REGEX =
-    /^https?:\/\/t\.me\/([a-zA-Z0-9_]{5,32})\/?$/i;
+    /^(?:https?:\/\/)?(?:www\.)?t\.me\/([a-zA-Z0-9_]{5,32})\/?$/i;
+  private static readonly YOUTUBE_URL_REGEX =
+    /^(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?v=[\w-]{6,}|shorts\/[\w-]{6,})|youtu\.be\/[\w-]{6,})(?:[\w\-./?%&=]*)?$/i;
   private static readonly STORIES_PER_PAGE = 5;
   private readonly logger = new Logger(BotUpdate.name);
   private activeLoginChatId: number | null = null;
@@ -64,6 +70,7 @@ export class BotUpdate {
     private readonly referralService: ReferralService,
     private readonly userRepository: UserRepository,
     private readonly adminNotificationService: AdminNotificationService,
+    private readonly youtubeDownloadService: YoutubeDownloadService,
   ) {}
 
   @Start()
@@ -310,6 +317,12 @@ export class BotUpdate {
 
     if (this.shouldHandleLoginInput(ctx)) {
       await this.handleLoginInput(ctx, rawText);
+      return;
+    }
+
+    const youtubeInput = this.extractYoutubeInput(rawText);
+    if (youtubeInput) {
+      await this.handleYoutubeRequest(ctx, youtubeInput);
       return;
     }
 
@@ -645,7 +658,74 @@ export class BotUpdate {
     return username
       .trim()
       .replace(/^https?:\/\/t\.me\//i, '')
+      .replace(/^t\.me\//i, '')
       .replace(/^@+/, '');
+  }
+
+  private extractYoutubeInput(text: string): string | null {
+    const trimmedText = text.trim();
+
+    if (!BotUpdate.YOUTUBE_URL_REGEX.test(trimmedText)) {
+      return null;
+    }
+
+    return trimmedText;
+  }
+
+  private async handleYoutubeRequest(
+    ctx: TelegrafContext,
+    input: string,
+  ): Promise<void> {
+    const chatId = this.getChatId(ctx);
+    if (!chatId) {
+      await this.replyHtml(ctx, BotMessages.chatNotDetected());
+      return;
+    }
+
+    await this.replyHtml(ctx, BotMessages.youtubeLoading());
+
+    try {
+      const result = await this.youtubeDownloadService.downloadFromInput(input);
+      const inputFile = Input.fromBuffer(result.buffer, result.filename);
+
+      if (result.mimeType.startsWith('video/')) {
+        await this.bot.telegram.sendVideo(chatId, inputFile, {
+          caption: BotMessages.youtubeDone(this.escapeHtml(result.title)),
+          parse_mode: 'HTML',
+        });
+        return;
+      }
+
+      await this.bot.telegram.sendDocument(chatId, inputFile, {
+        caption: BotMessages.youtubeDone(this.escapeHtml(result.title)),
+        parse_mode: 'HTML',
+      });
+    } catch (error) {
+      await this.adminNotificationService.notifyError(
+        this.toError(error),
+        'bot:youtube-download',
+        this.getUserId(ctx) ?? undefined,
+      );
+      await this.replyHtml(ctx, this.resolveYoutubeErrorMessage(error));
+    }
+  }
+
+  private resolveYoutubeErrorMessage(error: unknown): string {
+    if (!(error instanceof YoutubeDownloadException)) {
+      return BotMessages.youtubeDownloadFailed();
+    }
+
+    switch (error.code) {
+      case 'invalid_link':
+        return BotMessages.youtubeInvalidLink();
+      case 'unsupported_content':
+        return BotMessages.youtubeUnsupported();
+      case 'file_too_large':
+        return BotMessages.youtubeFileTooLarge();
+      case 'download_failed':
+      default:
+        return BotMessages.youtubeDownloadFailed();
+    }
   }
 
   private async processStoriesRequest(
