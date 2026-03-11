@@ -442,6 +442,67 @@ export const BotMessages = {
       'Yoki: <code>/stories @username</code>',
     ].join('\n'),
 
+  youtubeLoading: () =>
+    [
+      '⏳ <b>YouTube yuklanmoqda...</b>',
+      '',
+      '🔗 Havola tekshirilyapti va media tayyorlanmoqda.',
+    ].join('\n'),
+
+  youtubeDone: (title: string) =>
+    [
+      '✅ <b>YouTube media yuborildi</b>',
+      '',
+      `🎬 Nomi: <code>${title}</code>`,
+    ].join('\n'),
+
+  youtubeInvalidLink: () =>
+    [
+      '❌ <b>YouTube havolasi noto‘g‘ri</b>',
+      '',
+      'Quyidagi formatlardan birini yuboring:',
+      '• <code>https://www.youtube.com/watch?v=...</code>',
+      '• <code>https://youtu.be/...</code>',
+      '• <code>https://youtube.com/shorts/...</code>',
+    ].join('\n'),
+
+  youtubeUnsupported: () =>
+    [
+      '⚠️ <b>Kontent qo‘llab-quvvatlanmaydi</b>',
+      '',
+      'Bu YouTube havoladan media yuklab bo‘lmadi.',
+    ].join('\n'),
+
+  youtubeDownloadFailed: () =>
+    [
+      '❌ <b>YouTube yuklab bo‘lmadi</b>',
+      '',
+      'Hozircha media olishda xatolik yuz berdi. Keyinroq qayta urinib ko‘ring.',
+    ].join('\n'),
+
+  youtubeToolNotInstalled: () =>
+    [
+      '⚠️ <b>YouTube xizmat hozircha tayyor emas</b>',
+      '',
+      'Serverda <code>yt-dlp</code> yoki <code>ffmpeg</code> topilmadi.',
+      'Iltimos, administratorga murojaat qiling.',
+    ].join('\n'),
+
+  youtubeAuthRequired: () =>
+    [
+      '⚠️ <b>Video vaqtincha cheklangan</b>',
+      '',
+      'YouTube bu video uchun tasdiqlash talab qilmoqda.',
+      'Iltimos, keyinroq qayta urinib ko‘ring.',
+    ].join('\n'),
+
+  youtubeFileTooLarge: () =>
+    [
+      '⚠️ <b>Fayl juda katta</b>',
+      '',
+      'Bu videoning hajmi Telegram yuborish limiti uchun juda katta.',
+    ].join('\n'),
+
   help: (botUsername?: string) =>
     [
       'ℹ️ <b>Story Downloader — Yordam</b>',
@@ -449,6 +510,10 @@ export const BotMessages = {
       '<b>📥 Story yuklash:</b>',
       '<code>@username</code> yuboring',
       '<code>/stories @username</code>',
+      '',
+      '<b>▶️ YouTube yuklash:</b>',
+      '<code>https://www.youtube.com/watch?v=...</code>',
+      '<code>https://youtu.be/...</code>',
       '',
       '<b>📄 Sahifalash:</b>',
       '5 tadan yuklanadi (eng yangidan).',
