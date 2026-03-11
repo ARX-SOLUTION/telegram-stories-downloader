@@ -190,10 +190,14 @@ export class YoutubeDownloadService {
   private mapYtDlpError(error: unknown): YoutubeDownloadException {
     const message = this.extractErrorMessage(error).toLowerCase();
 
-    if (message.includes('enoent')) {
+    if (
+      message.includes('enoent') ||
+      message.includes('ffmpeg is not installed') ||
+      message.includes('ffprobe and ffmpeg not found')
+    ) {
       return new YoutubeDownloadException(
         'tool_not_installed',
-        'yt-dlp binary is not installed.',
+        'yt-dlp or ffmpeg binary is not installed.',
       );
     }
 
