@@ -289,10 +289,9 @@ When count reaches 5 → User A gains full story access
 ### Smart Text Handler
 
 - Any plain text message matching a Telegram username should trigger story download
-- Any plain text message containing a supported YouTube link should trigger YouTube media download
 - Messages starting with `/` are skipped and handled as commands
 - Short words under 5 characters are silently ignored
-- `@username`, `https://t.me/<username>`, `http://t.me/<username>`, and `t.me/<username>` are accepted by the story handler
+- `https://t.me/<username>` links are also accepted by the current bot handler
 
 ---
 
