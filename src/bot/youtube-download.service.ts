@@ -12,7 +12,8 @@ export type YoutubeDownloadErrorCode =
   | 'unsupported_content'
   | 'download_failed'
   | 'file_too_large'
-  | 'tool_not_installed';
+  | 'tool_not_installed'
+  | 'authentication_required';
 
 export class YoutubeDownloadException extends Error {
   constructor(
@@ -223,6 +224,18 @@ export class YoutubeDownloadService {
       return new YoutubeDownloadException(
         'unsupported_content',
         'Unsupported YouTube content.',
+      );
+    }
+
+    if (
+      message.includes('sign in to confirm you’re not a bot') ||
+      message.includes("sign in to confirm you're not a bot") ||
+      message.includes('use --cookies-from-browser') ||
+      message.includes('use --cookies for the authentication')
+    ) {
+      return new YoutubeDownloadException(
+        'authentication_required',
+        'YouTube requires authentication cookies for this media.',
       );
     }
 

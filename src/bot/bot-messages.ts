@@ -488,6 +488,14 @@ export const BotMessages = {
       'Iltimos, administratorga murojaat qiling.',
     ].join('\n'),
 
+  youtubeAuthRequired: () =>
+    [
+      '⚠️ <b>Video vaqtincha cheklangan</b>',
+      '',
+      'YouTube bu video uchun tasdiqlash talab qilmoqda.',
+      'Iltimos, keyinroq qayta urinib ko‘ring.',
+    ].join('\n'),
+
   youtubeFileTooLarge: () =>
     [
       '⚠️ <b>Fayl juda katta</b>',

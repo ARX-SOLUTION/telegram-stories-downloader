@@ -741,6 +741,8 @@ export class BotUpdate {
         return BotMessages.youtubeFileTooLarge();
       case 'tool_not_installed':
         return BotMessages.youtubeToolNotInstalled();
+      case 'authentication_required':
+        return BotMessages.youtubeAuthRequired();
       case 'download_failed':
       default:
         return BotMessages.youtubeDownloadFailed();
