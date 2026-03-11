@@ -13,7 +13,8 @@ export class AdminNotificationService {
     dateStyle: 'short',
     timeStyle: 'medium',
   });
-  private missingAdminIdLogged = false;
+  private missingAdminTargetLogged = false;
+  private privateDmFallbackLogged = false;
 
   constructor(
     @InjectBot() private readonly bot: Telegraf,
@@ -182,21 +183,21 @@ export class AdminNotificationService {
   }
 
   private async send(message: string): Promise<void> {
-    const adminId = this.configService.get<number>('admin.telegramId') ?? 0;
+    const targetChatId = this.resolveTargetChatId();
 
-    if (!adminId) {
-      if (!this.missingAdminIdLogged) {
+    if (!targetChatId) {
+      if (!this.missingAdminTargetLogged) {
         this.logger.warn(
-          'ADMIN_TELEGRAM_ID not set. Admin notifications skipped.',
+          'Admin notification target is not configured. Set ADMIN_TELEGRAM_CHAT_ID to a private group/channel chat id. Notifications skipped.',
         );
-        this.missingAdminIdLogged = true;
+        this.missingAdminTargetLogged = true;
       }
 
       return;
     }
 
     try {
-      await this.bot.telegram.sendMessage(adminId, message, {
+      await this.bot.telegram.sendMessage(targetChatId, message, {
         parse_mode: 'HTML',
         link_preview_options: { is_disabled: true },
       });
@@ -206,6 +207,28 @@ export class AdminNotificationService {
         error instanceof Error ? error.stack : undefined,
       );
     }
+  }
+
+  private resolveTargetChatId(): number | null {
+    const adminChatId = this.configService.get<number>('admin.chatId') ?? 0;
+    if (Number.isSafeInteger(adminChatId) && adminChatId !== 0) {
+      return adminChatId;
+    }
+
+    const adminTelegramId =
+      this.configService.get<number>('admin.telegramId') ?? 0;
+    if (Number.isSafeInteger(adminTelegramId) && adminTelegramId < 0) {
+      return adminTelegramId;
+    }
+
+    if (adminTelegramId > 0 && !this.privateDmFallbackLogged) {
+      this.logger.warn(
+        'ADMIN_TELEGRAM_ID points to a private chat and is no longer used by default. Set ADMIN_TELEGRAM_CHAT_ID to a dedicated admin group/channel chat id.',
+      );
+      this.privateDmFallbackLogged = true;
+    }
+
+    return null;
   }
 
   private formatName(user: User): string {
