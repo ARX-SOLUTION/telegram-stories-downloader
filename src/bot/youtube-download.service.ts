@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -39,6 +40,20 @@ interface YoutubeMetadata {
 export class YoutubeDownloadService {
   private static readonly MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
   private static readonly YT_DLP_BINARY = 'yt-dlp';
+  private readonly cookiesFile: string;
+  private readonly cookiesFromBrowser: string;
+  private readonly extractorClients: string;
+
+  constructor(private readonly configService: ConfigService) {
+    this.cookiesFile =
+      this.configService.get<string>('youtube.cookiesFile')?.trim() ?? '';
+    this.cookiesFromBrowser =
+      this.configService.get<string>('youtube.cookiesFromBrowser')?.trim() ??
+      '';
+    this.extractorClients =
+      this.configService.get<string>('youtube.extractorClients')?.trim() ||
+      'android,ios,web';
+  }
 
   async downloadFromInput(input: string): Promise<YoutubeDownloadResult> {
     const normalizedInput = this.normalizeYoutubeInput(input);
@@ -123,7 +138,14 @@ export class YoutubeDownloadService {
     try {
       const { stdout } = await execFileAsync(
         YoutubeDownloadService.YT_DLP_BINARY,
-        ['--dump-single-json', '--no-playlist', '--no-warnings', url],
+        [
+          '--dump-single-json',
+          '--no-playlist',
+          '--no-warnings',
+          ...this.buildAuthArgs(),
+          ...this.buildYoutubeExtractorArgs(),
+          url,
+        ],
         {
           maxBuffer: 10 * 1024 * 1024,
         },
@@ -153,6 +175,8 @@ export class YoutubeDownloadService {
           '49M',
           '--merge-output-format',
           'mp4',
+          ...this.buildAuthArgs(),
+          ...this.buildYoutubeExtractorArgs(),
           '-f',
           'b[ext=mp4]/b',
           '-o',
@@ -186,6 +210,29 @@ export class YoutubeDownloadService {
       .slice(0, 80);
 
     return normalizedTitle || 'youtube-video';
+  }
+
+  private buildAuthArgs(): string[] {
+    if (this.cookiesFile) {
+      return ['--cookies', this.cookiesFile];
+    }
+
+    if (this.cookiesFromBrowser) {
+      return ['--cookies-from-browser', this.cookiesFromBrowser];
+    }
+
+    return [];
+  }
+
+  private buildYoutubeExtractorArgs(): string[] {
+    if (!this.extractorClients) {
+      return [];
+    }
+
+    return [
+      '--extractor-args',
+      `youtube:player_client=${this.extractorClients}`,
+    ];
   }
 
   private mapYtDlpError(error: unknown): YoutubeDownloadException {
