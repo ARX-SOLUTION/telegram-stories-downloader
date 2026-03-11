@@ -36,6 +36,11 @@ interface YoutubeMetadata {
   title?: string;
 }
 
+interface YoutubeAuthStrategy {
+  args: string[];
+  source: 'cookies_file' | 'cookies_from_browser' | 'none';
+}
+
 @Injectable()
 export class YoutubeDownloadService {
   private static readonly MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
@@ -65,29 +70,63 @@ export class YoutubeDownloadService {
     }
 
     const tempDirectory = await fs.mkdtemp(join(tmpdir(), 'yt-download-'));
+    const authStrategies = await this.buildAuthStrategies();
+    let lastError: YoutubeDownloadException | null = null;
 
     try {
-      const metadata = await this.fetchMetadata(normalizedInput);
-      const downloadedFilePath = await this.downloadFile(
-        normalizedInput,
-        tempDirectory,
-      );
-      const buffer = await fs.readFile(downloadedFilePath);
+      for (const authStrategy of authStrategies) {
+        try {
+          const metadata = await this.fetchMetadata(
+            normalizedInput,
+            authStrategy.args,
+          );
+          const downloadedFilePath = await this.downloadFile(
+            normalizedInput,
+            tempDirectory,
+            authStrategy.args,
+          );
+          const buffer = await fs.readFile(downloadedFilePath);
 
-      if (buffer.length > YoutubeDownloadService.MAX_FILE_SIZE_BYTES) {
-        throw new YoutubeDownloadException(
-          'file_too_large',
-          'Media is too large.',
-        );
+          if (buffer.length > YoutubeDownloadService.MAX_FILE_SIZE_BYTES) {
+            throw new YoutubeDownloadException(
+              'file_too_large',
+              'Media is too large.',
+            );
+          }
+
+          const safeTitle = this.buildSafeFilename(metadata.title);
+          return {
+            title: metadata.title?.trim() || 'YouTube video',
+            buffer,
+            mimeType: 'video/mp4',
+            filename: `${safeTitle}.mp4`,
+          };
+        } catch (error) {
+          const mappedError =
+            error instanceof YoutubeDownloadException
+              ? error
+              : this.mapYtDlpError(error);
+
+          lastError = mappedError;
+
+          if (
+            mappedError.code === 'authentication_required' &&
+            authStrategy.source !== 'none'
+          ) {
+            continue;
+          }
+
+          throw mappedError;
+        }
       }
 
-      const safeTitle = this.buildSafeFilename(metadata.title);
-      return {
-        title: metadata.title?.trim() || 'YouTube video',
-        buffer,
-        mimeType: 'video/mp4',
-        filename: `${safeTitle}.mp4`,
-      };
+      throw (
+        lastError ??
+        new YoutubeDownloadException(
+          'download_failed',
+          'YouTube download failed.',
+        )
+      );
     } finally {
       await fs.rm(tempDirectory, { recursive: true, force: true });
     }
@@ -134,7 +173,10 @@ export class YoutubeDownloadService {
     return /^[a-zA-Z0-9_-]{6,20}$/.test(value);
   }
 
-  private async fetchMetadata(url: string): Promise<YoutubeMetadata> {
+  private async fetchMetadata(
+    url: string,
+    authArgs: string[],
+  ): Promise<YoutubeMetadata> {
     try {
       const { stdout } = await execFileAsync(
         YoutubeDownloadService.YT_DLP_BINARY,
@@ -142,7 +184,7 @@ export class YoutubeDownloadService {
           '--dump-single-json',
           '--no-playlist',
           '--no-warnings',
-          ...this.buildAuthArgs(),
+          ...authArgs,
           ...this.buildYoutubeExtractorArgs(),
           url,
         ],
@@ -160,6 +202,7 @@ export class YoutubeDownloadService {
   private async downloadFile(
     url: string,
     directoryPath: string,
+    authArgs: string[],
   ): Promise<string> {
     const outputTemplate = join(directoryPath, 'video.%(ext)s');
 
@@ -175,7 +218,7 @@ export class YoutubeDownloadService {
           '49M',
           '--merge-output-format',
           'mp4',
-          ...this.buildAuthArgs(),
+          ...authArgs,
           ...this.buildYoutubeExtractorArgs(),
           '-f',
           'b[ext=mp4]/b',
@@ -212,16 +255,35 @@ export class YoutubeDownloadService {
     return normalizedTitle || 'youtube-video';
   }
 
-  private buildAuthArgs(): string[] {
-    if (this.cookiesFile) {
-      return ['--cookies', this.cookiesFile];
+  private async buildAuthStrategies(): Promise<YoutubeAuthStrategy[]> {
+    const strategies: YoutubeAuthStrategy[] = [];
+
+    if (this.cookiesFile && (await this.pathExists(this.cookiesFile))) {
+      strategies.push({
+        args: ['--cookies', this.cookiesFile],
+        source: 'cookies_file',
+      });
     }
 
     if (this.cookiesFromBrowser) {
-      return ['--cookies-from-browser', this.cookiesFromBrowser];
+      strategies.push({
+        args: ['--cookies-from-browser', this.cookiesFromBrowser],
+        source: 'cookies_from_browser',
+      });
     }
 
-    return [];
+    strategies.push({ args: [], source: 'none' });
+
+    return strategies;
+  }
+
+  private async pathExists(pathValue: string): Promise<boolean> {
+    try {
+      await fs.access(pathValue);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private buildYoutubeExtractorArgs(): string[] {
