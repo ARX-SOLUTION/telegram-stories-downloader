@@ -480,6 +480,14 @@ export const BotMessages = {
       'Hozircha media olishda xatolik yuz berdi. Keyinroq qayta urinib ko‘ring.',
     ].join('\n'),
 
+  youtubeToolNotInstalled: () =>
+    [
+      '⚠️ <b>YouTube xizmat hozircha tayyor emas</b>',
+      '',
+      'Serverda <code>yt-dlp</code> yoki <code>ffmpeg</code> topilmadi.',
+      'Iltimos, administratorga murojaat qiling.',
+    ].join('\n'),
+
   youtubeFileTooLarge: () =>
     [
       '⚠️ <b>Fayl juda katta</b>',

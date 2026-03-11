@@ -312,6 +312,10 @@ export class BotUpdate {
       return;
     }
 
+    if (this.shouldIgnoreShortText(rawText)) {
+      return;
+    }
+
     const username = ctx.from?.username ?? ctx.from?.first_name ?? 'user';
     this.logger.log(`Bot received from @${username}: ${rawText}`);
 
@@ -330,6 +334,19 @@ export class BotUpdate {
     if (storyUsername) {
       await this.handleStoriesRequest(ctx, storyUsername);
     }
+  }
+
+  private shouldIgnoreShortText(text: string): boolean {
+    const trimmedText = text.trim();
+    if (trimmedText.length >= 5) {
+      return false;
+    }
+
+    return (
+      !trimmedText.includes('@') &&
+      !trimmedText.includes('.') &&
+      !trimmedText.includes('/')
+    );
   }
 
   private async handleLoginInput(
@@ -722,6 +739,8 @@ export class BotUpdate {
         return BotMessages.youtubeUnsupported();
       case 'file_too_large':
         return BotMessages.youtubeFileTooLarge();
+      case 'tool_not_installed':
+        return BotMessages.youtubeToolNotInstalled();
       case 'download_failed':
       default:
         return BotMessages.youtubeDownloadFailed();

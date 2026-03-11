@@ -1,10 +1,18 @@
 import { Injectable } from '@nestjs/common';
+import { execFile } from 'node:child_process';
+import { promises as fs } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 export type YoutubeDownloadErrorCode =
   | 'invalid_link'
   | 'unsupported_content'
   | 'download_failed'
-  | 'file_too_large';
+  | 'file_too_large'
+  | 'tool_not_installed';
 
 export class YoutubeDownloadException extends Error {
   constructor(
@@ -22,70 +30,58 @@ export interface YoutubeDownloadResult {
   filename: string;
 }
 
-interface PipedStreamsResponse {
+interface YoutubeMetadata {
   title?: string;
-  videoStreams?: Array<{
-    url: string;
-    format?: string;
-    mimeType?: string;
-    quality?: string;
-    bitrate?: number;
-    contentLength?: number;
-  }>;
 }
-
-type PipedVideoStream = NonNullable<
-  PipedStreamsResponse['videoStreams']
->[number];
 
 @Injectable()
 export class YoutubeDownloadService {
   private static readonly MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
+  private static readonly YT_DLP_BINARY = 'yt-dlp';
 
   async downloadFromInput(input: string): Promise<YoutubeDownloadResult> {
-    const videoId = this.extractVideoId(input);
-    if (!videoId) {
+    const normalizedInput = this.normalizeYoutubeInput(input);
+    if (!normalizedInput) {
       throw new YoutubeDownloadException(
         'invalid_link',
         'Invalid YouTube link.',
       );
     }
 
-    const metadata = await this.fetchStreams(videoId);
-    const selectedStream = this.selectStream(metadata.videoStreams ?? []);
+    const tempDirectory = await fs.mkdtemp(join(tmpdir(), 'yt-download-'));
 
-    if (!selectedStream) {
-      throw new YoutubeDownloadException(
-        'unsupported_content',
-        'Unsupported YouTube content.',
+    try {
+      const metadata = await this.fetchMetadata(normalizedInput);
+      const downloadedFilePath = await this.downloadFile(
+        normalizedInput,
+        tempDirectory,
       );
+      const buffer = await fs.readFile(downloadedFilePath);
+
+      if (buffer.length > YoutubeDownloadService.MAX_FILE_SIZE_BYTES) {
+        throw new YoutubeDownloadException(
+          'file_too_large',
+          'Media is too large.',
+        );
+      }
+
+      const safeTitle = this.buildSafeFilename(metadata.title);
+      return {
+        title: metadata.title?.trim() || 'YouTube video',
+        buffer,
+        mimeType: 'video/mp4',
+        filename: `${safeTitle}.mp4`,
+      };
+    } finally {
+      await fs.rm(tempDirectory, { recursive: true, force: true });
     }
-
-    const buffer = await this.fetchBuffer(selectedStream.url);
-
-    if (buffer.length > YoutubeDownloadService.MAX_FILE_SIZE_BYTES) {
-      throw new YoutubeDownloadException(
-        'file_too_large',
-        'Media is too large.',
-      );
-    }
-
-    const title = metadata.title?.trim() || 'youtube-video';
-    const safeTitle = title.replace(/[^a-zA-Z0-9-_]+/g, '_').slice(0, 80);
-
-    return {
-      title,
-      buffer,
-      mimeType: selectedStream.mimeType ?? 'video/mp4',
-      filename: `${safeTitle || 'youtube-video'}.mp4`,
-    };
   }
 
-  private extractVideoId(input: string): string | null {
-    const trimmed = input.trim();
-    const withProtocol = /^(https?:\/\/)/i.test(trimmed)
-      ? trimmed
-      : `https://${trimmed}`;
+  private normalizeYoutubeInput(input: string): string | null {
+    const trimmedInput = input.trim();
+    const withProtocol = /^(https?:\/\/)/i.test(trimmedInput)
+      ? trimmedInput
+      : `https://${trimmedInput}`;
 
     let parsedUrl: URL;
     try {
@@ -98,7 +94,7 @@ export class YoutubeDownloadService {
 
     if (hostname === 'youtu.be') {
       const shortId = parsedUrl.pathname.replace(/^\//, '').split('/')[0];
-      return this.isValidVideoId(shortId) ? shortId : null;
+      return this.isValidVideoId(shortId) ? parsedUrl.toString() : null;
     }
 
     if (hostname !== 'youtube.com' && hostname !== 'm.youtube.com') {
@@ -107,12 +103,12 @@ export class YoutubeDownloadService {
 
     if (parsedUrl.pathname === '/watch') {
       const watchId = parsedUrl.searchParams.get('v') ?? '';
-      return this.isValidVideoId(watchId) ? watchId : null;
+      return this.isValidVideoId(watchId) ? parsedUrl.toString() : null;
     }
 
     if (parsedUrl.pathname.startsWith('/shorts/')) {
       const shortsId = parsedUrl.pathname.split('/')[2] ?? '';
-      return this.isValidVideoId(shortsId) ? shortsId : null;
+      return this.isValidVideoId(shortsId) ? parsedUrl.toString() : null;
     }
 
     return null;
@@ -122,50 +118,132 @@ export class YoutubeDownloadService {
     return /^[a-zA-Z0-9_-]{6,20}$/.test(value);
   }
 
-  private async fetchStreams(videoId: string): Promise<PipedStreamsResponse> {
-    const response = await fetch(
-      `https://piped.video/api/v1/streams/${videoId}`,
+  private async fetchMetadata(url: string): Promise<YoutubeMetadata> {
+    try {
+      const { stdout } = await execFileAsync(
+        YoutubeDownloadService.YT_DLP_BINARY,
+        ['--dump-single-json', '--no-playlist', '--no-warnings', url],
+        {
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      );
+
+      return JSON.parse(stdout.trim()) as YoutubeMetadata;
+    } catch (error) {
+      throw this.mapYtDlpError(error);
+    }
+  }
+
+  private async downloadFile(
+    url: string,
+    directoryPath: string,
+  ): Promise<string> {
+    const outputTemplate = join(directoryPath, 'video.%(ext)s');
+
+    try {
+      await execFileAsync(
+        YoutubeDownloadService.YT_DLP_BINARY,
+        [
+          '--no-playlist',
+          '--no-progress',
+          '--newline',
+          '--no-warnings',
+          '--max-filesize',
+          '49M',
+          '--merge-output-format',
+          'mp4',
+          '-f',
+          'b[ext=mp4]/b',
+          '-o',
+          outputTemplate,
+          url,
+        ],
+        { maxBuffer: 10 * 1024 * 1024 },
+      );
+    } catch (error) {
+      throw this.mapYtDlpError(error);
+    }
+
+    const files = await fs.readdir(directoryPath);
+    const outputFilename = files.find((filename) =>
+      filename.startsWith('video.'),
     );
-
-    if (!response.ok) {
+    if (!outputFilename) {
       throw new YoutubeDownloadException(
         'download_failed',
-        `Could not load YouTube stream metadata: ${response.status}`,
+        'Could not find downloaded media file.',
       );
     }
 
-    return (await response.json()) as PipedStreamsResponse;
+    return join(directoryPath, outputFilename);
   }
 
-  private selectStream(
-    streams: PipedStreamsResponse['videoStreams'],
-  ): PipedVideoStream | null {
-    const compatibleStreams = (streams ?? [])
-      .filter((stream) => {
-        const mimeType = stream.mimeType?.toLowerCase() ?? '';
-        const format = stream.format?.toLowerCase() ?? '';
-        const size = stream.contentLength ?? 0;
+  private buildSafeFilename(title?: string): string {
+    const normalizedTitle = (title?.trim() || 'youtube-video')
+      .replace(/[^a-zA-Z0-9-_]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 80);
 
-        return (
-          (mimeType.includes('video/mp4') || format.includes('mp4')) &&
-          (size === 0 || size <= YoutubeDownloadService.MAX_FILE_SIZE_BYTES)
-        );
-      })
-      .sort((first, second) => (first.bitrate ?? 0) - (second.bitrate ?? 0));
-
-    return compatibleStreams[0] ?? null;
+    return normalizedTitle || 'youtube-video';
   }
 
-  private async fetchBuffer(url: string): Promise<Buffer> {
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new YoutubeDownloadException(
-        'download_failed',
-        `Could not download YouTube media: ${response.status}`,
+  private mapYtDlpError(error: unknown): YoutubeDownloadException {
+    const message = this.extractErrorMessage(error).toLowerCase();
+
+    if (
+      message.includes('enoent') ||
+      message.includes('ffmpeg is not installed') ||
+      message.includes('ffprobe and ffmpeg not found')
+    ) {
+      return new YoutubeDownloadException(
+        'tool_not_installed',
+        'yt-dlp or ffmpeg binary is not installed.',
       );
     }
 
-    const arrayBuffer = await response.arrayBuffer();
-    return Buffer.from(arrayBuffer);
+    if (message.includes('file is larger than max-filesize')) {
+      return new YoutubeDownloadException(
+        'file_too_large',
+        'Media is too large.',
+      );
+    }
+
+    if (
+      message.includes('unsupported url') ||
+      message.includes('unable to extract') ||
+      message.includes('is not a valid url')
+    ) {
+      return new YoutubeDownloadException(
+        'invalid_link',
+        'Invalid YouTube link.',
+      );
+    }
+
+    if (message.includes('requested format is not available')) {
+      return new YoutubeDownloadException(
+        'unsupported_content',
+        'Unsupported YouTube content.',
+      );
+    }
+
+    return new YoutubeDownloadException(
+      'download_failed',
+      this.extractErrorMessage(error),
+    );
+  }
+
+  private extractErrorMessage(error: unknown): string {
+    if (error instanceof Error && 'stderr' in error) {
+      const stderr = (error as { stderr?: string }).stderr;
+      if (typeof stderr === 'string' && stderr.trim()) {
+        return stderr;
+      }
+    }
+
+    if (error instanceof Error) {
+      return error.message;
+    }
+
+    return 'Unknown YouTube download error.';
   }
 }
