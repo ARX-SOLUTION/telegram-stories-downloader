@@ -134,9 +134,55 @@ export class UserClientService implements OnModuleInit, OnApplicationShutdown {
   }
 
   private persistSession() {
-    const session = this.client.session.save() as unknown as string;
-    fs.writeFileSync(this.sessionFilePath, session, 'utf-8');
-    this.logger.log(`💾 Session saved to ${this.sessionFilePath}`);
+    const session = (this.client.session.save() as unknown as string)?.trim();
+    if (!session) {
+      this.logger.warn("Session string bo'sh bo'lgani sababli saqlanmadi.");
+      return;
+    }
+
+    const sessionDir = path.dirname(this.sessionFilePath);
+    if (!fs.existsSync(sessionDir)) {
+      fs.mkdirSync(sessionDir, { recursive: true });
+    }
+
+    // 1. Agar mavjud session fayli bo\'lsa, uni overwrite qilmasdan timestamp bilan backup qilib saqlash
+    if (fs.existsSync(this.sessionFilePath)) {
+      try {
+        const existingSession = fs
+          .readFileSync(this.sessionFilePath, 'utf-8')
+          .trim();
+        if (existingSession && existingSession !== session) {
+          const parsed = path.parse(this.sessionFilePath);
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const backupFileName = `${parsed.name}.backup-${timestamp}${parsed.ext || '.txt'}`;
+          const backupFilePath = path.join(parsed.dir, backupFileName);
+          fs.copyFileSync(this.sessionFilePath, backupFilePath);
+          this.logger.log(`📦 Oldingi sessiya zaxiralandi: ${backupFilePath}`);
+        }
+      } catch (err) {
+        this.logger.warn(
+          'Mavjud sessiyani zaxiralashda xatolik yuz berdi:',
+          err,
+        );
+      }
+    }
+
+    // 2. Atomic write: vaqtinchalik faylga yozib, keyin rename qilish
+    const tempFilePath = `${this.sessionFilePath}.tmp-${Date.now()}`;
+    try {
+      fs.writeFileSync(tempFilePath, session, 'utf-8');
+      fs.renameSync(tempFilePath, this.sessionFilePath);
+      this.logger.log(`💾 Session saved to ${this.sessionFilePath}`);
+    } catch (err) {
+      if (fs.existsSync(tempFilePath)) {
+        try {
+          fs.unlinkSync(tempFilePath);
+        } catch {
+          // ignore cleanup error
+        }
+      }
+      throw err;
+    }
   }
 
   private resolveGramJsLogLevel(level: string): LogLevel {
