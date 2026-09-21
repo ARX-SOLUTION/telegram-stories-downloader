@@ -81,6 +81,10 @@ export class BotUpdate {
       return;
     }
 
+    this.logger.log(
+      `[Command] /start by user ${fromUser.id} (@${fromUser.username ?? '-'})`,
+    );
+
     const existingUser = await this.userRepository.findById(fromUser.id);
     const user = await this.userRepository.upsertUser({
       id: fromUser.id,
@@ -131,6 +135,7 @@ export class BotUpdate {
   @Command('login')
   async onLogin(ctx: TelegrafContext): Promise<void> {
     const chatId = this.getChatId(ctx);
+    this.logger.log(`[Command] /login in chat ${chatId}`);
 
     if (this.isLoginLockedToAnotherChat(chatId)) {
       await this.replyHtml(ctx, BotMessages.loginLocked());
@@ -192,6 +197,7 @@ export class BotUpdate {
       return;
     }
 
+    this.logger.log(`[Command] /stories for ${username}`);
     await this.handleStoriesRequest(ctx, username);
   }
 
@@ -608,6 +614,9 @@ export class BotUpdate {
     }
 
     const normalizedUsername = this.normalizeDisplayUsername(username);
+    this.logger.log(
+      `[Stories] Requested @${normalizedUsername} (page ${page}) by user ${userId}`,
+    );
     const user = await this.userRepository.findById(userId);
 
     const referralStatus = await this.referralService.getReferralStatus(userId);
@@ -699,6 +708,7 @@ export class BotUpdate {
       return;
     }
 
+    this.logger.log(`[YouTube] Downloading: ${input}`);
     await this.replyHtml(ctx, BotMessages.youtubeLoading());
 
     try {
@@ -710,6 +720,7 @@ export class BotUpdate {
           caption: BotMessages.youtubeDone(this.escapeHtml(result.title)),
           parse_mode: 'HTML',
         });
+        this.logger.log(`[YouTube] Video sent to chat ${chatId}: ${result.filename}`);
         return;
       }
 
@@ -717,6 +728,7 @@ export class BotUpdate {
         caption: BotMessages.youtubeDone(this.escapeHtml(result.title)),
         parse_mode: 'HTML',
       });
+      this.logger.log(`[YouTube] Document sent to chat ${chatId}: ${result.filename}`);
     } catch (error) {
       await this.adminNotificationService.notifyError(
         this.toError(error),
@@ -791,6 +803,10 @@ export class BotUpdate {
           await this.sleep(400);
         }
       }
+
+      this.logger.log(
+        `[Stories] Sent ${uploadedStoriesCount}/${result.stories.length} stories for @${normalizedUsername} to chat ${chatId}`,
+      );
 
       if (uploadedStoriesCount === 0) {
         await this.sendHtmlToChat(chatId, BotMessages.unknownError());
