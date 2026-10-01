@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { execFile } from 'node:child_process';
 import { promises as fs } from 'node:fs';
@@ -40,6 +40,7 @@ interface YoutubeMetadata {
 export class YoutubeDownloadService {
   private static readonly MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
   private static readonly YT_DLP_BINARY = 'yt-dlp';
+  private readonly logger = new Logger(YoutubeDownloadService.name);
   private readonly cookiesFile: string;
   private readonly cookiesFromBrowser: string;
   private readonly extractorClients: string;
@@ -64,6 +65,7 @@ export class YoutubeDownloadService {
       );
     }
 
+    this.logger.log('Starting YouTube download for: ' + normalizedInput);
     const tempDirectory = await fs.mkdtemp(join(tmpdir(), 'yt-download-'));
 
     try {
@@ -81,6 +83,7 @@ export class YoutubeDownloadService {
         );
       }
 
+      this.logger.log('YouTube download completed: ' + (metadata.title || '') + ' (' + (buffer.length / (1024 * 1024)).toFixed(2) + ' MB)');
       const safeTitle = this.buildSafeFilename(metadata.title);
       return {
         title: metadata.title?.trim() || 'YouTube video',
@@ -135,6 +138,7 @@ export class YoutubeDownloadService {
   }
 
   private async fetchMetadata(url: string): Promise<YoutubeMetadata> {
+    this.logger.debug('Fetching yt-dlp metadata for: ' + url);
     try {
       const { stdout } = await execFileAsync(
         YoutubeDownloadService.YT_DLP_BINARY,
@@ -161,6 +165,7 @@ export class YoutubeDownloadService {
     url: string,
     directoryPath: string,
   ): Promise<string> {
+    this.logger.debug('Running yt-dlp download for: ' + url);
     const outputTemplate = join(directoryPath, 'video.%(ext)s');
 
     try {

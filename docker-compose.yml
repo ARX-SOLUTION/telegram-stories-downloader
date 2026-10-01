@@ -1,0 +1,14 @@
+services:
+  user-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: telegram-stories-downloader
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file:
+      - .env
+    volumes:
+      - ./sessions:/app/sessions
+      - ./session.txt:/app/session.txt

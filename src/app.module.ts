@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TelegrafModule } from 'nestjs-telegraf';
 import { ScheduleModule } from '@nestjs/schedule';
@@ -6,6 +6,7 @@ import { AdminModule } from './admin/admin.module';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { BotModule } from './bot/bot.module';
+import { LoggingMiddleware } from './common/logging.middleware';
 import configuration from './config/configuration';
 import { DatabaseModule } from './database/database.module';
 import { UserClientModule } from './user-client/user-client.module';
@@ -47,4 +48,8 @@ import { UserClientModule } from './user-client/user-client.module';
   controllers: [AppController],
   providers: [AppService],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer): void {
+    consumer.apply(LoggingMiddleware).forRoutes('*');
+  }
+}
